@@ -91,7 +91,7 @@ app.use('/api/user', userRoutes);
 
 
 // CORRECT:
-require('./cron_jobs');
+//require('./cron_jobs');
 const { isGstApplicable, roundedRupeesFromPaise } = require('./utils/tax'); // This import is correct
 
 function computeBaseFareINR(vehicleType, distanceKm) {
@@ -443,51 +443,51 @@ app.get('/api/user/:id', async (req, res) => {
 
 // In server.js, replace the existing findDriverForRide function with this one.
 
-async function findDriverForRide(ride) {
-  console.log(`[DISPATCHER] Initiating driver search for ride ${ride.external_id}`);
+// async function findDriverForRide(ride) {
+  // console.log(`[DISPATCHER] Initiating driver search for ride ${ride.external_id}`);
   
-  // Use a database connection from the global pool
-  const client = await global.pool.connect();
+  // // Use a database connection from the global pool
+  // const client = await global.pool.connect();
   
-  try {
-    // Step 1: Update the ride status to 'SEARCHING' immediately.
-    // This prevents it from being dispatched again in the next cycle.
-    await client.query(
-      `UPDATE scheduled_rides SET status = 'SEARCHING' WHERE external_id = $1`,
-      [ride.external_id]
-    );
+  // try {
+    // // Step 1: Update the ride status to 'SEARCHING' immediately.
+    // // This prevents it from being dispatched again in the next cycle.
+    // await client.query(
+      // `UPDATE scheduled_rides SET status = 'SEARCHING' WHERE external_id = $1`,
+      // [ride.external_id]
+    // );
 
-    // Step 2: Prepare the ride data to send to the driver.
-    // We can add more details here later if needed.
-    const rideRequestData = {
-      rideId: ride.external_id,
-      pickupAddress: ride.pickup_address,
-      dropoffAddress: ride.dropoff_address,
-      estimatedFare: ride.estimated_fare,
-      scheduledPickupTime: ride.scheduled_pickup_time,
-    };
+    // // Step 2: Prepare the ride data to send to the driver.
+    // // We can add more details here later if needed.
+    // const rideRequestData = {
+      // rideId: ride.external_id,
+      // pickupAddress: ride.pickup_address,
+      // dropoffAddress: ride.dropoff_address,
+      // estimatedFare: ride.estimated_fare,
+      // scheduledPickupTime: ride.scheduled_pickup_time,
+    // };
 
-    // Step 3: Emit a socket.io event to all connected drivers in the 'available_drivers' room.
-    // ✅ CRITICAL FIX: Use `global.io` to access the initialized socket server instance.
-    if (global.io) {
-      global.io.to('available_drivers').emit('new-scheduled-ride-request', rideRequestData);
-      console.log(`[DISPATCHER] Emitted ride request ${ride.external_id} to 'available_drivers' room.`);
-    } else {
-      console.error('[DISPATCHER] global.io is not initialized. Cannot emit socket event.');
-    }
+    // // Step 3: Emit a socket.io event to all connected drivers in the 'available_drivers' room.
+    // // ✅ CRITICAL FIX: Use `global.io` to access the initialized socket server instance.
+    // if (global.io) {
+      // global.io.to('available_drivers').emit('new-scheduled-ride-request', rideRequestData);
+      // console.log(`[DISPATCHER] Emitted ride request ${ride.external_id} to 'available_drivers' room.`);
+    // } else {
+      // console.error('[DISPATCHER] global.io is not initialized. Cannot emit socket event.');
+    // }
 
-  } catch (e) {
-    console.error(`[DISPATCHER] Error processing ride ${ride.external_id}:`, e);
-    // If an error occurs, revert the status so the system can try again in the next minute.
-    await client.query(
-        `UPDATE scheduled_rides SET status = 'SCHEDULED' WHERE external_id = $1`,
-        [ride.external_id]
-    );
-  } finally {
-    // IMPORTANT: Always release the client back to the pool.
-    client.release();
-  }
-}
+  // } catch (e) {
+    // console.error(`[DISPATCHER] Error processing ride ${ride.external_id}:`, e);
+    // // If an error occurs, revert the status so the system can try again in the next minute.
+    // await client.query(
+        // `UPDATE scheduled_rides SET status = 'SCHEDULED' WHERE external_id = $1`,
+        // [ride.external_id]
+    // );
+  // } finally {
+    // // IMPORTANT: Always release the client back to the pool.
+    // client.release();
+  // }
+// }
 
 // ✅✅✅ PASTE THIS ENTIRE NEW ENDPOINT INTO YOUR server.js FILE ✅✅✅
 
