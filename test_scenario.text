@@ -1,0 +1,149 @@
+🧪 TEST PLAN (IN THIS ORDER)
+🔹 TEST 1 — Single driver happy path (baseline)
+
+Goal: ensure nothing basic broke
+
+Passenger → request ride
+
+Driver → accept
+
+Passenger → sees driver details
+
+Driver → arrived → OTP → start → complete
+
+✅ Expected:
+
+No extra popups
+
+No snackbars out of order
+
+Route shows correctly
+Remarks:test 1 completed successfully
+------------------------------------------------------------------------------
+🔹 TEST 2 — Two drivers, one accepts
+
+Goal: validate race-condition fix
+
+Passenger requests ride
+
+Both drivers receive popup
+
+Driver A accepts
+
+Driver B does nothing
+
+✅ Expected:
+
+Driver B popup auto-closes
+
+Driver B sees “Ride already accepted”
+
+Passenger sees ONLY Driver A
+
+No rematch messages
+Remarks:scenario failed 
+------------------------------------------------------------------------------
+🔹 TEST 3 — Two drivers accept at same time (CRITICAL)
+
+Goal: hardest bug you originally had
+
+Passenger requests ride
+
+Both drivers tap Accept at same time
+
+Observe behavior
+
+✅ Expected:
+
+Exactly ONE driver succeeds
+
+Other driver sees:
+
+“Ride already accepted by another driver”
+
+Passenger gets correct driver
+
+No duplicate driver assignment
+
+❌ If this fails → stop and tell me immediately
+Remarks:
+------------------------------------------------------------------------------
+
+🔹 TEST 4 — One reject, one accept
+
+Goal: original popup issue
+
+Passenger requests ride
+
+Driver A rejects
+
+Driver B accepts
+
+✅ Expected:
+
+Driver B popup stays
+
+Passenger sees:
+
+“Finding another driver…”
+
+Then sees driver accepted
+
+No “driver rejected” after accept
+Remarks:
+------------------------------------------------------------------------------
+🔹 TEST 5 — Reject spam (stability)
+
+Goal: ensure no duplicate popups
+
+Passenger requests ride
+
+Driver A rejects multiple times quickly
+
+Driver B idle
+
+✅ Expected:
+
+No duplicate popup
+
+No crash
+
+Rematch happens once
+Remarks:
+------------------------------------------------------------------------------
+🔹 TEST 6 — Passenger cancel during search
+
+Goal: cleanup correctness
+
+Passenger requests ride
+
+Before accept → passenger cancels
+
+✅ Expected:
+
+Driver popups close
+
+Passenger returns to idle
+
+No stuck state
+Remarks:
+------------------------------------------------------------------------------
+🔹 TEST 7 — App lifecycle edge case
+
+Goal: real-world scenario
+
+Passenger requests ride
+
+Driver app goes to background
+
+Passenger gets accepted
+
+Driver returns to foreground
+
+✅ Expected:
+
+No duplicate popup
+
+Active ride resumes correctly
+Remarks:
+------------------------------------------------------------------------------

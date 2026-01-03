@@ -1,0 +1,6 @@
+node_modules/
+.env
+uploads/
+logs/
+firebase-service-account-key.json
+.idea/
