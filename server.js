@@ -4,7 +4,6 @@ require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
-const admin = require('firebase-admin');
 const { Pool } = require('pg');
 
 const authRoutes = require('./routes/auth.js');
@@ -42,13 +41,19 @@ global.pool = pool; // <--- Set global.pool BEFORE mounting routes
 const app = express();
 app.set('trust proxy', true);
 
-const path = require('path');
-const serviceAccount = require(path.join(__dirname, 'firebase-service-account-key.json'));
+const admin = require('firebase-admin');
+
 admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
+  credential: admin.credential.cert({
+    projectId: process.env.FIREBASE_PROJECT_ID,
+    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+    privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+  }),
 });
 
-console.log('✅ Firebase Admin SDK initialized successfully!');
+console.log('✅ Firebase Admin initialized via ENV');
+
+console.log('✅ Firebase Admin initialized via ENV');
 
 app.use(
   '/uploads',
