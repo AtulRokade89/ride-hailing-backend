@@ -5,6 +5,8 @@ const express = require('express');
 const http = require('http');
 const cors = require('cors');
 const { Pool } = require('pg');
+const path = require('path');
+const admin = require('firebase-admin');
 
 const authRoutes = require('./routes/auth.js');
 const driverVerificationRoutes = require('./routes/driverVerification.js');
@@ -41,7 +43,7 @@ global.pool = pool; // <--- Set global.pool BEFORE mounting routes
 const app = express();
 app.set('trust proxy', true);
 
-const admin = require('firebase-admin');
+
 
 admin.initializeApp({
   credential: admin.credential.cert({
