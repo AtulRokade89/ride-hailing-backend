@@ -1,6 +1,8 @@
 // server.js (Corrected)
 require('dotenv').config();
 
+
+
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
@@ -21,16 +23,18 @@ const demand = require('./routes/demand');
 const scheduleRoutes = require('./routes/schedule.js');
 const adminWalletRoutes = require("./routes/adminWallet");
 const userRoutes = require('./routes/user.js'); 
+const pool = require('./db');
+
 
 
 
 
 
 // --- DB Pool ---
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-});
+// const pool = new Pool({
+  // connectionString: process.env.DATABASE_URL,
+  // ssl: { rejectUnauthorized: false },
+// });
 
 // Expose for routes that need them at runtime (MOVED THIS BLOCK UP)
 global.pool = pool; // <--- Set global.pool BEFORE mounting routes
@@ -38,6 +42,9 @@ global.pool = pool; // <--- Set global.pool BEFORE mounting routes
 
 // --- Express app ---
 const app = express();
+app.use(cors());
+app.use(express.json());
+
 app.set('trust proxy', true);
 
 
@@ -66,8 +73,7 @@ app.use((req, res, next) => {
 });
 
 
-app.use(cors());
-app.use(express.json());
+
 
 // Simple check
 app.get('/', (_req, res) => res.send('Ride Hailing Backend is running!'));

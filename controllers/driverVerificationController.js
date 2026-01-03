@@ -2,8 +2,8 @@
 //const { Pool } = require('pg');
 const multer = require('multer');
 const path = require('path');
-require('dotenv').config(); 
-
+//require('dotenv').config(); 
+const fs = require('fs');
 // const pool = new Pool({
   // user: process.env.DB_USER,
   // host: process.env.DB_HOST,
@@ -12,7 +12,15 @@ require('dotenv').config();
   // port: process.env.DB_PORT || 5432,
 // });
 
-const pool = global.pool;
+//const pool = global.pool;
+const pool = require('../db');
+
+
+
+const uploadDir = path.join(__dirname, '../uploads/driver_docs');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
 
 
 // ===== Multer setup for image uploads =====
@@ -62,9 +70,9 @@ const submitVerification = async (req, res) => {
   };
 
     // Simple validation
-    if (!user_id || !pan_number || !aadhar_number || !vehicle_number || !vehicle_color) {
-      return res.status(400).json({ error: 'Missing required fields' });
-    }
+    // if (!user_id || !pan_number || !aadhar_number || !vehicle_number || !vehicle_color) {
+      // return res.status(400).json({ error: 'Missing required fields' });
+    // }
 
     // Uploaded file URLs
   normalizedData.panImageUrl = req.files?.pan_image?.[0]?.path || null;
@@ -75,7 +83,7 @@ const submitVerification = async (req, res) => {
   normalizedData.vehiclePhotoUrl = req.files?.vehicle_photo?.[0]?.path || null;
   
   // Basic validation on normalized data
-  if (!normalizedData.userId || !normalizedData.panNumber || !normalizedData.aadharNumber || !normalizedData.vehicleNumber) {
+  if (!normalizedData.userId || !normalizedData.panNumber || !normalizedData.aadharNumber || !normalizedData.vehicleNumber || !normalizedData.vehicleColor) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
 
@@ -164,7 +172,7 @@ DO UPDATE SET
     return res.status(200).json({
       success: true,
       message: 'Verification submitted successfully',
-      data: result.rows[0],
+      //data: result.rows[0],
     });
   } catch (err) {
     console.error('Verification Error:', err);

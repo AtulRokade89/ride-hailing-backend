@@ -9,7 +9,9 @@
     // port: process.env.DB_PORT,
 // });
 
-const pool = global.pool;
+//const pool = global.pool;
+const pool = require('../db');
+
 
 // ✅ FINAL, COMPLETE VERSION
 const unblockAfterPayment = async (req, res) => {
@@ -30,7 +32,7 @@ const unblockAfterPayment = async (req, res) => {
          FROM wallet_ledger
          WHERE driver_id = $1
            AND is_settled = FALSE
-           AND type = 'DEBIT_CASH_COLLECTED'`,
+           AND type in('DEBIT_CASH_COLLECTED','CASH_RECEIVED')`,
         [driverId]
     );
     const duesToSettle = duesResult.rows;

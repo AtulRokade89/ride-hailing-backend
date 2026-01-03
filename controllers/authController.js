@@ -246,7 +246,9 @@ const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
 const crypto = require('crypto');
 const twilio = require('twilio');
-const pool = global.pool;
+//const pool = global.pool;
+const pool = require('../db');
+
 
 // Initialize the database connection pool
 // const pool = new Pool({
@@ -277,14 +279,19 @@ const twilioClient = twilio(
 
 // --- User Registration (Upgraded for Verification) ---
 const register = async (req, res) => {
-    const { name, email, password, role, phone_number } = req.body;
+ const { name, email, password, role, phone_number } = req.body || {};
 
-    if (!['passenger', 'driver'].includes(role)) {
+if (!name || !email || !password || !role) {
+  return res.status(400).json({ error: 'Missing required fields' });
+}
+const normalizedRole = role?.toLowerCase();
+
+    if (!['passenger', 'driver'].includes(normalizedRole)) {
         return res.status(400).json({ error: 'Invalid role specified.' });
     }
 
     // --- Passenger Registration with Verification ---
-    if (role === 'passenger') {
+    if (normalizedRole  === 'passenger') {
         const client = await pool.connect(); // Get a client from the pool for a transaction
         try {
             await client.query('BEGIN'); // Start the transaction
@@ -378,7 +385,7 @@ const register = async (req, res) => {
     }
 
     // --- Existing Driver Registration Logic (can be upgraded similarly later) ---
-    if (role === 'driver') {
+    if (normalizedRole  === 'driver') {
         // Your existing driver registration code can go here.
         // For now, it will proceed without email verification for drivers.
         try {
@@ -386,7 +393,7 @@ const register = async (req, res) => {
             const hashedPassword = await bcrypt.hash(password, salt);
             const newUser = await pool.query(
                 'INSERT INTO users (name, email, password_hash, role, phone_number) VALUES ($1, $2, $3, $4, $5) RETURNING id, role',
-                [name, email, hashedPassword, role, phone_number]
+                [name, email, hashedPassword, normalizedRole, phone_number]
             );
             const userId = newUser.rows[0].id;
             const userRole = newUser.rows[0].role;
@@ -404,7 +411,12 @@ const register = async (req, res) => {
 // 🎯🎯🎯 REPLACE your entire existing 'login' function with this one 🎯🎯🎯
 
 const login = async (req, res) => {
-    const { email, password } = req.body;
+  const { email, password } = req.body || {};
+
+if (!email || !password) {
+  return res.status(400).json({ message: 'Email and password are required' });
+}
+
 
     try {
         // 1️⃣ Fetch user info + verification status + block status
@@ -521,9 +533,10 @@ const successPayload = {
   role: user.role,
   verificationStatus:
     user.role === 'driver'
-      ? user.verification_status || 'pending_verification'
+      ? user.driver_verification_status || 'pending_verification'
       : 'n/a',
 };
+
 if (user.role === 'driver') {
   // If we set these above, attach them; otherwise default to 0/null
    successPayload.upcomingDuePaise = req.upcomingDuePaise ?? 0;
