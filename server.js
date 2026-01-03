@@ -14,7 +14,7 @@ const rideRoutes = require('./routes/ride.js');
 const initSocketServer = require('./socket.js'); // returns io
 const paymentRoutes = require('./routes/payment');
 const walletRoutes = require('./routes/wallet');
-const initializeCronJobs = require('./cron_jobs'); 
+//const initializeCronJobs = require('./cron_jobs'); 
 const driverRoutes = require('./routes/driver.js');
 const duesRoutes = require('./routes/dues');
 const demand = require('./routes/demand');
@@ -183,7 +183,7 @@ const server = http.createServer(app);
 const io = initSocketServer(server, pool);  // initialise ONCE
 
 global.io = io; // <--- global.io set here
-initializeCronJobs(pool, io);
+//initializeCronJobs(pool, io);
 
 
 

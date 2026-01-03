@@ -152,11 +152,22 @@ const crypto = require('crypto');
 const router = express.Router();
 
 // Razorpay keys from .env
-const key_id     = process.env.RZP_KEY_ID;
-const key_secret = process.env.RZP_KEY_SECRET;
+let rzpInstance = null;
 
-// Razorpay client
-const rzp = new Razorpay({ key_id, key_secret });
+function getRazorpay() {
+  if (!rzpInstance) {
+    const key_id = process.env.RZP_KEY_ID;
+    const key_secret = process.env.RZP_KEY_SECRET;
+
+    if (!key_id || !key_secret) {
+      throw new Error('Razorpay keys are missing in environment variables');
+    }
+
+    rzpInstance = new Razorpay({ key_id, key_secret });
+  }
+
+  return rzpInstance;
+}
 
 // Small helper: half-up int rounding (consistent with your invoices)
 function roundHalfUpToInt(value) {
@@ -179,12 +190,14 @@ router.post('/create-order', async (req, res) => {
     if (!rideId) return res.status(400).json({ error: 'missing_rideId' });
     if (!amount || amount < 1) return res.status(400).json({ error: 'invalid_amount' });
 
-    const order = await rzp.orders.create({
-      amount,            // paise (Razorpay requirement)
-      currency,
-      receipt: `ride_${rideId}`,
-      notes: { rideId }
-    });
+ const rzp = getRazorpay();
+
+const order = await rzp.orders.create({
+  amount,
+  currency,
+  receipt: `ride_${rideId}`,
+  notes: { rideId }
+});
 
     // Return test key for Checkout
     res.json({ orderId: order.id, key_id });
