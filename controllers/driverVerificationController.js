@@ -1,16 +1,19 @@
 // controllers/driverVerificationController.js
-const { Pool } = require('pg');
+//const { Pool } = require('pg');
 const multer = require('multer');
 const path = require('path');
 require('dotenv').config(); 
 
-const pool = new Pool({
-  user: process.env.DB_USER,
-  host: process.env.DB_HOST,
-  database: process.env.DB_NAME,
-  password: process.env.DB_PASSWORD,
-  port: process.env.DB_PORT || 5432,
-});
+// const pool = new Pool({
+  // user: process.env.DB_USER,
+  // host: process.env.DB_HOST,
+  // database: process.env.DB_NAME,
+  // password: process.env.DB_PASSWORD,
+  // port: process.env.DB_PORT || 5432,
+// });
+
+const pool = global.pool;
+
 
 // ===== Multer setup for image uploads =====
 const storage = multer.diskStorage({
