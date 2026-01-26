@@ -4,6 +4,7 @@ const express = require('express');
 const router = express.Router();
 // ✅✅✅ THIS IS THE FIX. IMPORT THE POOL DIRECTLY. ✅✅✅
 const { sendNotificationToUser } = require('../services/notification_sender');
+const initSocketServer = require('../socket');
 
 
 // --- FARE LOGIC (This code is perfect) ---
@@ -61,6 +62,32 @@ router.post('/create', async (req, res) => {
             ) VALUES ($1, $2, ST_SetSRID(ST_MakePoint($3, $4), 4326), ST_SetSRID(ST_MakePoint($5, $6), 4326), $7, $8, $9, $10, $11, $12)`,
             [externalId, passengerId, pickup.longitude, pickup.latitude, destination.longitude, destination.latitude, pickup.address, destination.address, vehicleType, scheduledPickupTime, estimatedFare, distanceKm]
         );
+		
+		// // 🔥🔥🔥 EMIT SCHEDULED RIDE TO CORRECT DRIVERS 🔥🔥🔥
+// try {
+  // const io = initSocketServer.getIo();
+
+  // const vt = String(vehicleType).toUpperCase();
+
+  // io.to(`drivers:${vt}`).emit('new-scheduled-ride-request', {
+    // rideId: externalId,
+    // passengerId,
+    // pickupAddress: pickup.address,
+    // dropoffAddress: destination.address,
+    // pickupLatitude: pickup.latitude,
+    // pickupLongitude: pickup.longitude,
+    // scheduledPickupTime,
+    // estimatedFare,
+    // vehicleType: vt,
+  // });
+
+  // console.log(
+    // `📅 Scheduled ride ${externalId} sent to drivers:${vt}`
+  // );
+// } catch (e) {
+  // console.error('❌ Failed to emit scheduled ride:', e.message);
+// }
+
 		
 await sendNotificationToUser(
   passengerId,
@@ -193,48 +220,155 @@ router.get('/passenger/:passengerId', async (req, res) => {
 
 // --- CANCEL RIDE (✅ USE `pool` HERE) ---
 router.post('/cancel', async (req, res) => {
-	const pool = global.pool; 
-    const { scheduleId, passengerId } = req.body;
-    const PENALTY_AMOUNT = 50;
-    if (!scheduleId || !passengerId) {
-        return res.status(400).json({ error: 'missing_required_fields' });
+  const pool = global.pool;
+  const { scheduleId, passengerId } = req.body;
+  const PENALTY_AMOUNT = 50;
+
+  if (!scheduleId || !passengerId) {
+    return res.status(400).json({ error: 'missing_required_fields' });
+  }
+
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // 1️⃣ Fetch ride
+    const rideQuery = await client.query(
+      `
+      SELECT status, scheduled_pickup_time, driver_id
+      FROM scheduled_rides
+      WHERE external_id = $1 AND passenger_id = $2
+      `,
+      [scheduleId, passengerId]
+    );
+
+    if (rideQuery.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'scheduled_ride_not_found' });
     }
-    // ✅ Use the imported 'pool'
-    const client = await pool.connect();
+
+    const ride = rideQuery.rows[0];
+
+    if (ride.status === 'IN_TRANSIT' || ride.status === 'COMPLETED') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        error: 'ride_already_started_cannot_cancel',
+      });
+    }
+
+    // 2️⃣ Penalty logic
+    const scheduledTime = new Date(ride.scheduled_pickup_time);
+    const now = new Date();
+    const hoursUntilPickup =
+      (scheduledTime.getTime() - now.getTime()) / (1000 * 60 * 60);
+
+    let penaltyApplied = false;
+    let message = 'Ride cancelled successfully. No penalty applied.';
+
+    if (hoursUntilPickup <= 2) {
+      await client.query(
+        `UPDATE scheduled_rides
+         SET schedule_penalty_due = $1
+         WHERE external_id = $2`,
+        [PENALTY_AMOUNT, scheduleId]
+      );
+      penaltyApplied = true;
+      message = `Ride cancelled late. A penalty of Rs.${PENALTY_AMOUNT} has been applied.`;
+    }
+
+    // 3️⃣ Mark cancelled
+    await client.query(
+      `
+      UPDATE scheduled_rides
+      SET status = 'CANCELLED',
+          cancelled_at = NOW(),
+          cancellation_reason = $1,
+          penalty_applied = $2
+      WHERE external_id = $3
+      `,
+      [
+        penaltyApplied ? 'BY_PASSENGER_LATE' : 'BY_PASSENGER_EARLY',
+        penaltyApplied,
+        scheduleId,
+      ]
+    );
+
+    // 🔥🔥🔥 4️⃣ SOCKET NOTIFY (THIS IS THE REAL FIX)
     try {
-        await client.query('BEGIN');
-        const rideQuery = await client.query(
-            `SELECT scheduled_pickup_time FROM scheduled_rides WHERE external_id = $1 AND passenger_id = $2 AND status = 'SCHEDULED'`,
-            [scheduleId, passengerId]
-        );
-        if (rideQuery.rows.length === 0) {
-            await client.query('ROLLBACK');
-            return res.status(404).json({ error: 'scheduled_ride_not_found_or_already_cancelled' });
+      const io = initSocketServer.getIo();
+      const activeDrivers = initSocketServer.getActiveDrivers();
+
+      // 🔹 A) SEARCHING STATE → multiple drivers saw popup
+      const notifiedDrivers =
+        global.rideNotifiedDrivers?.[scheduleId] || new Set();
+
+      console.log(
+        `📢 Cancelling scheduled ride ${scheduleId}, notifying ${notifiedDrivers.size} searching drivers`
+      );
+
+      for (const driverId of notifiedDrivers) {
+        const socketId = activeDrivers[String(driverId)]?.socketId;
+        if (socketId) {
+          io.to(socketId).emit('dismissRideRequest', {
+            rideId: scheduleId,
+            reason: 'cancelled_by_passenger',
+          });
+
+          io.to(socketId).emit('rideCancelledByPassenger', {
+            rideId: scheduleId,
+            type: 'SCHEDULED',
+            message: 'Passenger cancelled the scheduled ride',
+          });
         }
-        const scheduledTime = new Date(rideQuery.rows[0].scheduled_pickup_time);
-        const now = new Date();
-        const hoursUntilPickup = (scheduledTime.getTime() - now.getTime()) / (1000 * 60 * 60);
-        let penaltyApplied = false;
-        let message = 'Ride cancelled successfully. No penalty applied.';
-        if (hoursUntilPickup <= 2) {
-            await client.query(`UPDATE scheduled_rides SET schedule_penalty_due = $1 WHERE external_id = $2`, [PENALTY_AMOUNT, scheduleId]);
-            penaltyApplied = true;
-            message = `Ride cancelled late. A penalty of Rs.${PENALTY_AMOUNT} has been applied.`;
+      }
+
+      // 🔹 B) ACCEPTED / LOCKED STATE → single driver_id
+      if (ride.driver_id) {
+        const driverSocket =
+          activeDrivers[String(ride.driver_id)]?.socketId;
+
+        if (driverSocket) {
+          io.to(driverSocket).emit('dismissRideRequest', {
+            rideId: scheduleId,
+            reason: 'cancelled_by_passenger',
+          });
+
+          io.to(driverSocket).emit('rideCancelledByPassenger', {
+            rideId: scheduleId,
+            type: 'SCHEDULED',
+            message: 'Passenger cancelled the scheduled ride',
+          });
         }
-        await client.query(
-            `UPDATE scheduled_rides SET status = 'CANCELLED', cancelled_at = NOW(), cancellation_reason = $1, penalty_applied = $2 WHERE external_id = $3`,
-            [penaltyApplied ? 'BY_PASSENGER_LATE' : 'BY_PASSENGER_EARLY', penaltyApplied, scheduleId]
-        );
-        await client.query('COMMIT');
-        res.json({ ok: true, penalty_applied: penaltyApplied, message: message });
-    } catch (e) {
-        await client.query('ROLLBACK');
-        console.error('Error cancelling scheduled ride:', e);
-        res.status(500).json({ error: 'server_error', details: e.message });
-    } finally {
-        client.release();
+      }
+
+      // 🔹 C) Cleanup memory
+      delete global.rideNotifiedDrivers?.[scheduleId];
+
+    } catch (socketErr) {
+      console.error(
+        '❌ Failed to emit scheduled cancel sockets:',
+        socketErr
+      );
     }
+
+    await client.query('COMMIT');
+
+    res.json({
+      ok: true,
+      penalty_applied: penaltyApplied,
+      message,
+    });
+
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('Error cancelling scheduled ride:', e);
+    res.status(500).json({ error: 'server_error', details: e.message });
+  } finally {
+    client.release();
+  }
 });
+
 
 // ✅✅✅ THIS IS THE FIX. EXPORT THE ROUTER DIRECTLY. ✅✅✅
 module.exports = router;

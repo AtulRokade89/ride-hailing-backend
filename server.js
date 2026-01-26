@@ -1,14 +1,11 @@
 // server.js (Corrected)
 require('dotenv').config();
 
-
-
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
-const { Pool } = require('pg');
-const path = require('path');
 const admin = require('firebase-admin');
+const { Pool } = require('pg');
 
 const authRoutes = require('./routes/auth.js');
 const driverVerificationRoutes = require('./routes/driverVerification.js');
@@ -16,25 +13,36 @@ const rideRoutes = require('./routes/ride.js');
 const initSocketServer = require('./socket.js'); // returns io
 const paymentRoutes = require('./routes/payment');
 const walletRoutes = require('./routes/wallet');
-//const initializeCronJobs = require('./cron_jobs'); 
+const initializeCronJobs = require('./cron_jobs'); 
 const driverRoutes = require('./routes/driver.js');
 const duesRoutes = require('./routes/dues');
 const demand = require('./routes/demand');
 const scheduleRoutes = require('./routes/schedule.js');
 const adminWalletRoutes = require("./routes/adminWallet");
 const userRoutes = require('./routes/user.js'); 
-const pool = require('./db');
+const { getPassengerBadge } = require('./utils/ratingUtils'); 
 
 
+
+if (
+  process.env.NODE_ENV === 'production' &&
+  process.env.APP_ENV !== 'PRODUCTION'
+) {
+  console.error('❌ Non-production app cannot run with NODE_ENV=production');
+  process.exit(1);
+}
 
 
 
 
 // --- DB Pool ---
-// const pool = new Pool({
-  // connectionString: process.env.DATABASE_URL,
-  // ssl: { rejectUnauthorized: false },
-// });
+const pool = new Pool({
+  user:     process.env.DB_USER,
+  host:     process.env.DB_HOST,
+  database: process.env.DB_NAME,
+  password: process.env.DB_PASSWORD,
+  port:     process.env.DB_PORT,
+});
 
 // Expose for routes that need them at runtime (MOVED THIS BLOCK UP)
 global.pool = pool; // <--- Set global.pool BEFORE mounting routes
@@ -42,24 +50,15 @@ global.pool = pool; // <--- Set global.pool BEFORE mounting routes
 
 // --- Express app ---
 const app = express();
-app.use(cors());
-app.use(express.json());
-
 app.set('trust proxy', true);
 
-
-
+const path = require('path');
+const serviceAccount = require(path.join(__dirname, 'firebase-service-account-key.json'));
 admin.initializeApp({
-  credential: admin.credential.cert({
-    projectId: process.env.FIREBASE_PROJECT_ID,
-    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-    privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-  }),
+  credential: admin.credential.cert(serviceAccount)
 });
 
-console.log('✅ Firebase Admin initialized via ENV');
-
-console.log('✅ Firebase Admin initialized via ENV');
+console.log('✅ Firebase Admin SDK initialized successfully!');
 
 app.use(
   '/uploads',
@@ -73,7 +72,8 @@ app.use((req, res, next) => {
 });
 
 
-
+app.use(cors());
+app.use(express.json());
 
 // Simple check
 app.get('/', (_req, res) => res.send('Ride Hailing Backend is running!'));
@@ -97,7 +97,7 @@ app.use('/api/user', userRoutes);
 
 
 // CORRECT:
-//require('./cron_jobs');
+require('./cron_jobs');
 const { isGstApplicable, roundedRupeesFromPaise } = require('./utils/tax'); // This import is correct
 
 function computeBaseFareINR(vehicleType, distanceKm) {
@@ -189,7 +189,7 @@ const server = http.createServer(app);
 const io = initSocketServer(server, pool);  // initialise ONCE
 
 global.io = io; // <--- global.io set here
-//initializeCronJobs(pool, io);
+initializeCronJobs(pool, io);
 
 
 
@@ -335,7 +335,7 @@ app.get('/api/drivers/:driverId/weekly-summary', async (req, res) => {
       try {
         await client.query('BEGIN');
         const { rideId: rideExternalId } = req.params;
-        const { passengerId, driverId, rating, review } = req.body;
+        const { passengerId, driverId, rating, review, tags } = req.body;
 
         if (!rideExternalId || !driverId || !passengerId || rating == null) {
           return res.status(400).json({ message: 'Missing required fields for rating.' });
@@ -373,6 +373,25 @@ app.get('/api/drivers/:driverId/weekly-summary', async (req, res) => {
            VALUES ($1, $2, $3, $4, $5, NOW())`,
           [internalRideId, driverId, passengerId, rating, review]
         );
+		
+		 if (Array.isArray(tags) && tags.length > 0) {
+      for (const tag of tags) {
+        await client.query(
+          `
+          INSERT INTO ride_rating_tags
+            (ride_external_id, rated_by_role, tag_key, tag_value)
+          VALUES
+            ($1, 'PASSENGER', $2, $3)
+          ON CONFLICT DO NOTHING
+          `,
+          [
+            rideExternalId,
+            tag.key,    // e.g. "driver_feedback"
+            tag.value,  // e.g. "Polite behaviour"
+          ]
+        );
+      }
+    }
         
         // --- Update the driver's average rating ---
         await client.query(
@@ -449,51 +468,51 @@ app.get('/api/user/:id', async (req, res) => {
 
 // In server.js, replace the existing findDriverForRide function with this one.
 
-// async function findDriverForRide(ride) {
-  // console.log(`[DISPATCHER] Initiating driver search for ride ${ride.external_id}`);
+async function findDriverForRide(ride) {
+  console.log(`[DISPATCHER] Initiating driver search for ride ${ride.external_id}`);
   
-  // // Use a database connection from the global pool
-  // const client = await global.pool.connect();
+  // Use a database connection from the global pool
+  const client = await global.pool.connect();
   
-  // try {
-    // // Step 1: Update the ride status to 'SEARCHING' immediately.
-    // // This prevents it from being dispatched again in the next cycle.
-    // await client.query(
-      // `UPDATE scheduled_rides SET status = 'SEARCHING' WHERE external_id = $1`,
-      // [ride.external_id]
-    // );
+  try {
+    // Step 1: Update the ride status to 'SEARCHING' immediately.
+    // This prevents it from being dispatched again in the next cycle.
+    await client.query(
+      `UPDATE scheduled_rides SET status = 'SEARCHING' WHERE external_id = $1`,
+      [ride.external_id]
+    );
 
-    // // Step 2: Prepare the ride data to send to the driver.
-    // // We can add more details here later if needed.
-    // const rideRequestData = {
-      // rideId: ride.external_id,
-      // pickupAddress: ride.pickup_address,
-      // dropoffAddress: ride.dropoff_address,
-      // estimatedFare: ride.estimated_fare,
-      // scheduledPickupTime: ride.scheduled_pickup_time,
-    // };
+    // Step 2: Prepare the ride data to send to the driver.
+    // We can add more details here later if needed.
+    const rideRequestData = {
+      rideId: ride.external_id,
+      pickupAddress: ride.pickup_address,
+      dropoffAddress: ride.dropoff_address,
+      estimatedFare: ride.estimated_fare,
+      scheduledPickupTime: ride.scheduled_pickup_time,
+    };
 
-    // // Step 3: Emit a socket.io event to all connected drivers in the 'available_drivers' room.
-    // // ✅ CRITICAL FIX: Use `global.io` to access the initialized socket server instance.
-    // if (global.io) {
-      // global.io.to('available_drivers').emit('new-scheduled-ride-request', rideRequestData);
-      // console.log(`[DISPATCHER] Emitted ride request ${ride.external_id} to 'available_drivers' room.`);
-    // } else {
-      // console.error('[DISPATCHER] global.io is not initialized. Cannot emit socket event.');
-    // }
+    // Step 3: Emit a socket.io event to all connected drivers in the 'available_drivers' room.
+    // ✅ CRITICAL FIX: Use `global.io` to access the initialized socket server instance.
+    if (global.io) {
+      global.io.to('available_drivers').emit('new-scheduled-ride-request', rideRequestData);
+      console.log(`[DISPATCHER] Emitted ride request ${ride.external_id} to 'available_drivers' room.`);
+    } else {
+      console.error('[DISPATCHER] global.io is not initialized. Cannot emit socket event.');
+    }
 
-  // } catch (e) {
-    // console.error(`[DISPATCHER] Error processing ride ${ride.external_id}:`, e);
-    // // If an error occurs, revert the status so the system can try again in the next minute.
-    // await client.query(
-        // `UPDATE scheduled_rides SET status = 'SCHEDULED' WHERE external_id = $1`,
-        // [ride.external_id]
-    // );
-  // } finally {
-    // // IMPORTANT: Always release the client back to the pool.
-    // client.release();
-  // }
-// }
+  } catch (e) {
+    console.error(`[DISPATCHER] Error processing ride ${ride.external_id}:`, e);
+    // If an error occurs, revert the status so the system can try again in the next minute.
+    await client.query(
+        `UPDATE scheduled_rides SET status = 'SCHEDULED' WHERE external_id = $1`,
+        [ride.external_id]
+    );
+  } finally {
+    // IMPORTANT: Always release the client back to the pool.
+    client.release();
+  }
+}
 
 // ✅✅✅ PASTE THIS ENTIRE NEW ENDPOINT INTO YOUR server.js FILE ✅✅✅
 
@@ -523,7 +542,14 @@ app.get('/api/drivers/:driverId/daily-summary', async (req, res) => {
         dropoff_address,
         final_fare,       -- The total amount the passenger paid
         completed_at,
-        (SELECT type FROM wallet_ledger wl WHERE wl.ride_external_id = r.external_id AND wl.driver_id = r.driver_id LIMIT 1) as payment_type
+        (SELECT type 
+ FROM wallet_ledger wl 
+ WHERE wl.ride_external_id = r.external_id 
+   AND wl.driver_id = r.driver_id 
+   AND wl.type IN ('CREDIT_ONLINE', 'CASH_RECEIVED')
+ ORDER BY wl.created_at DESC
+ LIMIT 1
+) AS payment_type
       FROM rides r
       WHERE driver_id = $1
         AND status = 'COMPLETED'
@@ -575,7 +601,9 @@ app.get('/api/drivers/:driverId/daily-summary', async (req, res) => {
 
     // --- Send the final, glorious summary object ---
     res.json({
-      summaryDate: targetDate.toISOString().split('T')[0], // 'YYYY-MM-DD'
+      summaryDate: new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Kolkata'
+}).format(targetDate), // 'YYYY-MM-DD'
       totalRides: rides.length,
       totalEarnings: totalOnlineEarnings, // Driver's net earning for the day
       online: {
@@ -607,6 +635,17 @@ app.get('/api/health', (req, res) => {
     timestamp: new Date().toISOString(),
   });
 });
+
+async function reconcileStateOnStartup() {
+  console.log('🔄 Reconciling system state after restart');
+
+  await pool.query(`
+    UPDATE rides
+    SET status = 'COMPLETED'
+    WHERE status IN ('IN_TRANSIT')
+      AND completed_at IS NOT NULL
+  `);
+}
 
 // --- Listen ---
 const PORT = process.env.PORT || 3000;

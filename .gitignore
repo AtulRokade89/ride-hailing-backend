@@ -1,6 +1,18 @@
 node_modules/
+
+# Environment
 .env
+.env.*
+!.env.example
+firebase-service-account-key.json
+
+# Uploads / Logs
 uploads/
 logs/
-firebase-service-account-key.json
+*.log
+npm-debug.log*
+
+# IDE / OS
 .idea/
+.vscode/
+.DS_Store

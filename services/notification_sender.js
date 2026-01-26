@@ -5,7 +5,7 @@ function channelFor(type) {
   return 'ride_updates';
 }
 
-async function sendNotificationToUser(userId, title, body, data = {}) {
+async function sendNotificationToUser(userId, title, body, data = {},options = { showNotification: true } ) {
   let fcmToken;
 
   try {
@@ -31,32 +31,22 @@ async function sendNotificationToUser(userId, title, body, data = {}) {
 
   android: {
     priority: 'high',
-    ttl: 0,
-    notification: {
-      channelId: channelFor(safeData.type), // ride_requests
-      title: title,
-      body: body,
-      sound: 'default',
-      clickAction: 'FLUTTER_NOTIFICATION_CLICK',
-    },
-  },
+    ttl: 30000,
 
-  // 🔥 DATA IS STILL REQUIRED FOR NAVIGATION
-  data: safeData,
-
-  // iOS stays as-is
-  apns: {
-    headers: { 'apns-priority': '10' },
-    payload: {
-      aps: {
-        alert: { title, body },
+    ...(options.showNotification ? {
+      notification: {
+        channelId: channelFor(safeData.type),
+        title,
+        body,
         sound: 'default',
-        badge: 1,
-        'content-available': 1,
-      },
-    },
+      }
+    } : {})
   },
+
+  // 🟢 DATA ALWAYS SENT
+  data: safeData,
 };
+
 
 
     const response = await admin.messaging().send(message);

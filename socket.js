@@ -5,10 +5,17 @@
 	  roundedRupeesFromPaise,
 	} = require('./utils/tax');
 	const { sendNotificationToUser } = require('./services/notification_sender');
+	const SafetyService = require('./services/safety.service');
+	const { getPassengerBadge } = require('./utils/ratingUtils');
+
 
 	const activeDrivers = {};     // { [driverId]: { socketId, latitude, longitude, vehicleType, lastSeen } }
-	const activePassengers = {};  // { [passengerId]: socketId }
+	const activePassengers = {};  // { [passengerId]: { socketId, isForeground } }
 	const rideNotifiedDrivers = {};
+	const lastRouteSnapshotAt = {};
+	global.routeDeviationConsent = {}; 
+	const sosTimers = {};
+
 	let io = null;
 
 	// distance helper
@@ -95,6 +102,13 @@ function toPublicUrl(filePath) {
 	  if (io) return io;
 
 	  io = new Server(server, { cors: { origin: '*', methods: ['GET','POST'] } });
+	  
+	  // ✅ ADD THIS BLOCK RIGHT HERE
+io.use((socket, next) => {
+  socket.dbPool = pool;
+  socket.routeDeviationConsent = global.routeDeviationConsent;
+  next();
+});
 
 	  //
 	  // Helper: fetch driver stats for given driver ids (accepted_count, rejected_count)
@@ -210,8 +224,12 @@ function toPublicUrl(filePath) {
 			selected.forEach((c, idx) => {
 			  const rate = Math.max(0, Math.min(1, c.acceptRate || 0));
 			  const baseDelay = (idx < IMMEDIATE_BATCH) ? 0 : Math.round((1 - rate) * MAX_DELAY_MS);
-			 setTimeout(() => {
-  if (rideNotifiedDrivers[rideId]?.has(String(c.driverId))) return;
+	setTimeout(() => {
+  if (!rideNotifiedDrivers[rideId]) {
+    rideNotifiedDrivers[rideId] = new Set();
+  }
+
+  if (rideNotifiedDrivers[rideId].has(String(c.driverId))) return;
 
   const cur = activeDrivers[c.driverId];
   if (!cur || !cur.socketId) return;
@@ -254,6 +272,12 @@ function toPublicUrl(filePath) {
 
 	  io.on('connection', (socket) => {
 		console.log(`🔌 Socket connected: ${socket.id}`);
+		
+		 // 🛡️ ADMIN JOIN ROOM (SOS)
+  socket.on('join_admin', ({ adminId }) => {
+    socket.join('admin_room');
+    console.log(`👮 Admin ${adminId || 'unknown'} joined admin_room`);
+  });
 
 		/* ---------- join ---------- */
 		socket.on('join', async (payload = {}) => {
@@ -292,8 +316,15 @@ activeDrivers[userId] = {
   lastSeen: Date.now(),             // ⏱️ heartbeat
   isForeground: true,               // 📱 app visible
 };
-			  socket.join('available_drivers');
-  console.log(`✅ Driver ${userId} also joined the 'available_drivers' room for scheduled rides.`);
+socket.join(`driver:${userId}`);
+		if (!socket._joinedScheduledRoom) {
+  socket.join('available_drivers');
+  socket._joinedScheduledRoom = true;
+
+  console.log(
+    `✅ Driver ${userId} joined 'available_drivers' room (first time)`
+  );
+}
 			  if (vehicleType) {
 				socket.join(`drivers:${vehicleType}`);
 				console.log(`✅ Driver ${userId} joined drivers:${vehicleType}`);
@@ -304,19 +335,36 @@ activeDrivers[userId] = {
 			  try { await pool.query(`UPDATE drivers SET is_online = TRUE WHERE user_id = $1`, [userId]); }
 			  catch (e) { console.warn('set is_online TRUE failed:', e.message); }
 			} else if (role === 'passenger') {
-			  activePassengers[userId] = socket.id;
+			activePassengers[userId] = {
+  socketId: socket.id,
+  isForeground: true,
+};
 			  socket.join('passengers');
+			  socket.join(`passenger:${userId}`);  
 			  console.log(`✅ Passenger ${userId} registered`);
 			}
 		  } catch (e) { console.warn('join error:', e); }
 		});
 
 
-socket.on('appVisibility', ({ driverId, visible }) => {
-  if (activeDrivers[driverId]) {
-    activeDrivers[driverId].isForeground = !!visible;
+socket.on('appVisibility', ({ passengerId, role, visible }) => {
+  if (role !== 'passenger' || !passengerId) return;
+
+  if (!activePassengers[passengerId]) {
+    activePassengers[passengerId] = {};
   }
+
+  activePassengers[passengerId] = {
+    socketId: activePassengers[passengerId]?.socketId || socket.id,
+    isForeground: !!visible,
+  };
+
+  console.log(
+    `👁 Passenger ${passengerId} visibility = ${visible}`
+  );
 });
+
+
 
 		/* ---------- driver online toggle ---------- */
 		socket.on('driverOnlineToggle', async (payload = {}) => {
@@ -408,10 +456,16 @@ socket.on('driver-go-offline', async (data) => {
       }
     }
     
-    // 2. Remove from active drivers object.
-    if (activeDrivers[driverId]) {
-        delete activeDrivers[driverId];
-    }
+    // // 2. Remove from active drivers object.
+    // if (activeDrivers[driverId]) {
+        // delete activeDrivers[driverId];
+    // }
+	
+	if (activeDrivers[driverId]) {
+  activeDrivers[driverId].socketId = null;
+  activeDrivers[driverId].isForeground = false;
+  activeDrivers[driverId].lastSeen = Date.now();
+}
 
     // 3. Update the database.
     await pool.query(`UPDATE drivers SET is_online = FALSE WHERE user_id = $1`, [driverId]);
@@ -500,16 +554,23 @@ socket.on('driver-go-offline', async (data) => {
 		  existingDriver.latitude = latitude;
 		  existingDriver.longitude = longitude;
 		  existingDriver.lastSeen = Date.now();
-		  existingDriver.isForeground = true;
+		  if (existingDriver.isForeground !== false) {
+  existingDriver.isForeground = true;
+}
 
 
 		  // THIS IS THE MOST IMPORTANT LINE:
 		  // ONLY update the vehicleType if the payload provides a NEW, valid one.
 		  // Otherwise, leave the existing vehicleType (from the 'join' event) untouched.
-		  if (vehicleTypeFromPayload) {
-			existingDriver.vehicleType = vehicleTypeFromPayload;
-		  }
+		 if (
+  vehicleTypeFromPayload &&
+  typeof vehicleTypeFromPayload === 'string' &&
+  vehicleTypeFromPayload.length > 1
+) {
+  existingDriver.vehicleType = vehicleTypeFromPayload;
+}
 		}
+		
 		// --- END OF THE GUARANTEED FIX ---
 
 
@@ -538,6 +599,44 @@ socket.on('driver-go-offline', async (data) => {
 
 		// Broadcasting to other clients is also fine.
 		socket.broadcast.emit('driverLocation', { userId, latitude, longitude });
+		
+		// 🟢 OPTION-A STEP 2: PASSIVE ROUTE SNAPSHOT
+		if (!activeDrivers[userId]?.isForeground) {
+  return; // background / ride ended / app idle
+}
+ if (!activeDrivers[userId]?.isOnActiveRide) return;
+
+		try
+		{
+const activeRideId = await getActiveRideIdForDriver(pool, userId);
+
+// ❌ NO ACTIVE RIDE → HARD STOP
+if (!activeRideId) {
+ 
+  return;
+}
+
+
+// ⏱ NOW CHECK TIMER
+if (!shouldLogRouteSnapshot(activeRideId)) return;
+
+
+// ✅ SAFE TO LOG
+await logRouteSnapshot(pool, {
+  rideExternalId: activeRideId,
+  latitude,
+  longitude,
+  speedKmph: payload.speed ?? null,
+});
+
+delete lastRouteSnapshotAt[String(activeRideId)];
+
+} catch (e) {
+  console.warn('route snapshot failed:', e.message);
+}
+
+
+
 
 	  } catch (e) {
 		console.warn('driverLocationUpdate error:', e);
@@ -659,7 +758,17 @@ socket.on('driver-go-offline', async (data) => {
     const distanceKm = Number(payload.distanceKm) || 0;
     const pickup = payload.pickupLocation || payload.pickup || {};
     const drop = payload.destinationLocation || payload.destination || {};
-    const passengerLoc = payload.passengerLocation || pickup;
+    //const passengerLoc = payload.passengerLocation || pickup;
+	const isScheduledRide = extId.startsWith('sched_');
+	const originLat = isScheduledRide
+  ? Number(pickup.latitude)
+  : Number(payload.passengerLocation?.latitude ?? pickup.latitude);
+
+const originLng = isScheduledRide
+  ? Number(pickup.longitude)
+  : Number(payload.passengerLocation?.longitude ?? pickup.longitude);
+
+	
 
     if (
       !passengerId ||
@@ -695,6 +804,26 @@ socket.on('driver-go-offline', async (data) => {
       )
       RETURNING id
     `;
+	
+	// 🔹 Fetch passenger avg rating
+let passengerAvgRating = 0;
+
+try {
+  const r = await pool.query(
+    `
+    SELECT
+      ROUND(AVG(rating), 1) AS avg_rating
+    FROM passenger_ratings
+    WHERE passenger_id = $1
+    `,
+    [passengerId]
+  );
+
+  passengerAvgRating = Number(r.rows[0]?.avg_rating || 0);
+} catch (e) {
+  console.warn('Passenger rating fetch failed:', e.message);
+}
+
 
     const params = [
       passengerId,
@@ -716,17 +845,16 @@ socket.on('driver-go-offline', async (data) => {
 
     // ---- Find drivers ----
     const PROXIMITY_KM = 5.0;
-    const passengerLat = Number(passengerLoc.latitude);
-    const passengerLng = Number(passengerLoc.longitude);
+    //const passengerLat = Number(passengerLoc.latitude);
+    //const passengerLng = Number(passengerLoc.longitude);
 
-    const candidates = await findCandidateDrivers(
-      passengerLat,
-      passengerLng,
-      requestedVehicleType,
-      new Set(),
-      PROXIMITY_KM
-    );
-
+   const candidates = await findCandidateDrivers(
+  originLat,
+  originLng,
+  requestedVehicleType,
+  new Set(),
+  PROXIMITY_KM
+);
     // ---- Payload ----
     const otp = Math.floor(1000 + Math.random() * 9000).toString();
 
@@ -749,7 +877,12 @@ const rideRequestPayload = {
   otp,
   vehicleType: requestedVehicleType,
   distanceKm,
-  sentAt: new Date().toISOString(),
+  sentAt: Date.now().toString(),
+    passenger: {
+    avgRating: passengerAvgRating,
+    badge: getPassengerBadge(passengerAvgRating),
+  },
+
   pickup: {
     latitude: pickup.latitude,
     longitude: pickup.longitude,
@@ -773,30 +906,31 @@ for (const c of candidates) {
   try {
     const current = activeDrivers[c.driverId];
 
-    // 1. Always try the Socket first (Fastest)
-    if (current?.socketId && current.isForeground !== false){
+    // 🟢 CASE 1: App foreground → SOCKET ONLY
+    if (current?.socketId && current.isForeground === true) {
       io.to(current.socketId).emit('newRideRequest', rideRequestPayload);
+    } 
+    // 🔔 CASE 2: App background / killed → NOTIFICATION ONLY
+    else {
+      await sendNotificationToUser(
+        c.driverId,
+        '🚕 New Ride Request',
+        `Pickup nearby • ₹${finalAmountRupees}`,
+        {
+          type: 'NEW_RIDE',
+          rideId: String(extId),
+          sentAt: Date.now().toString(),
+        }
+      );
     }
-
-    // 2. 🔥 REMOVE THE 'ELSE'. Always send FCM as a backup/banner.
-    // This ensures the notification appears even if the socket is lagging.
-    await sendNotificationToUser(
-      c.driverId,
-      '🚕 New Ride Request',
-      `Pickup nearby • ₹${finalAmountRupees}`,
-      {
-        type: 'NEW_RIDE',
-        rideId: String(extId), // Ensure it is a string
-        sentAt: new Date().toISOString(),
-      }
-    );
 
     notified++;
     rideNotifiedDrivers[extId].add(String(c.driverId));
   } catch (e) {
-    console.warn(`FCM failed for driver ${c.driverId}:`, e.message);
+    console.warn(`Notify failed for driver ${c.driverId}:`, e.message);
   }
 }
+
 
     // ---- ACKs ----
     socket.emit('searchStarted', {
@@ -819,8 +953,36 @@ for (const c of candidates) {
     }
 
     console.log(`🟢 Ride ${extId} created, notified ${notified} driver(s)`);
+	
+	// 🔥 AUTO-EXPIRE RIDE AFTER 30 SECONDS
+setTimeout(async () => {
+  const result = await pool.query(
+    `UPDATE rides
+     SET status = 'EXPIRED'
+     WHERE external_id = $1 AND status = 'PENDING'
+     RETURNING external_id`,
+    [extId]
+  );
 
-  } catch (err) {
+  if (result.rowCount > 0) {
+    console.log(`⏱ Ride ${extId} expired`);
+
+    const notifiedSet = rideNotifiedDrivers[extId] || new Set();
+    for (const driverId of notifiedSet) {
+      const d = activeDrivers[driverId];
+      if (d?.socketId) {
+        io.to(d.socketId).emit('dismissRideRequest', {
+          rideId: extId,
+          reason: 'timeout'
+        });
+      }
+    }
+
+    delete rideNotifiedDrivers[extId];
+  }
+}, 30_000);
+
+	} catch (err) {
     console.error('requestRide handler error:', err);
     socket.emit('rideCreateError', { message: 'Internal server error' });
   }
@@ -842,7 +1004,7 @@ socket.on('requestRideResend', async ({ rideId, driverId }) => {
       passengerId: ride.passenger_id,
       vehicleType: ride.vehicle_type,
       distanceKm: ride.distance_km,
-      sentAt: new Date().toISOString(),
+      sentAt: Date.now().toString(),
       pickup: {
         latitude: ride.pickup_location.y,
         longitude: ride.pickup_location.x,
@@ -856,7 +1018,10 @@ socket.on('requestRideResend', async ({ rideId, driverId }) => {
     };
 
     // 🔥🔥🔥 THIS IS THE KEY LINE 🔥🔥🔥
-    socket.emit('newRideRequest', payload);
+    const dSid = activeDrivers[String(driverId)]?.socketId;
+if (dSid) {
+  io.to(dSid).emit('newRideRequest', payload);
+}
 
     console.log(`🔁 Resent ride ${rideId} to driver ${driverId}`);
   } catch (e) {
@@ -935,7 +1100,9 @@ socket.on('requestRideResend', async ({ rideId, driverId }) => {
                 passenger_id,
                 pickup_address,
                 ST_Y(pickup_location::geometry) as pickup_lat,
-                ST_X(pickup_location::geometry) as pickup_lon`, 
+                ST_X(pickup_location::geometry) as pickup_lon,  
+				ST_Y(dropoff_location::geometry) as drop_lat,
+				ST_X(dropoff_location::geometry) as drop_lon`, 
             [driverId, otp, rideId]
         );
         
@@ -944,8 +1111,22 @@ socket.on('requestRideResend', async ({ rideId, driverId }) => {
                 rideId,
                 message: 'Ride already accepted by another driver'
             });
+			if (activeDrivers[String(driverId)]) {
+  activeDrivers[String(driverId)].isOnActiveRide = false;
+}
+			
+			socket.emit('dismissRideRequest', {
+    rideId,
+    reason: 'accepted_by_other'
+  });
             return;
         }
+		
+		// ✅ MARK DRIVER AS ON ACTIVE RIDE (VERY IMPORTANT)
+if (activeDrivers[String(driverId)]) {
+  activeDrivers[String(driverId)].isOnActiveRide = true;
+}
+
 
         // 4. Dismiss request for other notified drivers
         const notifiedSet = rideNotifiedDrivers[String(rideId)] || new Set();
@@ -964,16 +1145,39 @@ socket.on('requestRideResend', async ({ rideId, driverId }) => {
 
         // 5. Notify Passenger
         const passengerId = rideDetails.rows[0]?.passenger_id?.toString();
+		 let passengerName = 'Passenger'; // A safe default name
         if (passengerId) {
-            const pSockId = activePassengers[passengerId];
+            try {
+                // Command the database to find the passenger's name
+                const passengerQuery = await pool.query(
+                    `SELECT name FROM users WHERE id = $1`,
+                    [passengerId]
+                );
+                
+                // If a name is found, use it!
+                if (passengerQuery.rows.length > 0) {
+                    passengerName = passengerQuery.rows[0].name;
+                }
+            } catch (e) {
+                console.error("Failed to fetch passenger name:", e);
+                // If it fails, passengerName will remain 'Passenger'
+            }
+        }
+		
+        if (passengerId) {
+            const pSockId = activePassengers[passengerId]?.socketId;
             
-         const rideAcceptedPayload = {
+       const rideAcceptedPayload = {
   rideId: rideId,
   driverId: driverId,
+
   driverName: driverData.driverName,
-  vehicleNumber: driverData.vehicleNumber,
-  vehicleModel: driverData.vehicleModel,
   contact: driverData.contact,
+
+  vehicleModel: driverData.vehicleModel,
+  vehicleNumber: driverData.vehicleNumber,
+  vehicleColor: driverData.vehicleColor, // ✅ ADD
+
   otp: otp,
 
   pickup: {
@@ -989,15 +1193,31 @@ socket.on('requestRideResend', async ({ rideId, driverId }) => {
   },
 
   driverLocation: driverLocation,
+
   driverInfo: {
     rating: driverData.rating,
   },
+
+  // 🔥🔥🔥 THIS IS THE REAL FIX 🔥🔥🔥
+  driverPhotoUrl: driverData.driverPhotoUrl
+    ? toPublicUrl(driverData.driverPhotoUrl)
+    : null,
+
+  vehiclePhotoUrl: driverData.vehiclePhotoUrl
+    ? toPublicUrl(driverData.vehiclePhotoUrl)
+    : null,
 };
+
 
 
             if (pSockId) {
                 io.to(pSockId).emit('searchStopped', { rideId, status: 'ACCEPTED' });
                 io.to(pSockId).emit('rideAccepted', rideAcceptedPayload);
+				   io.to(pSockId).emit('ride-status-update', {
+        rideId,
+        status: 'DRIVER_EN_ROUTE',
+        driverLocation,
+    });
             } else {
                 // Fallback to Push Notification if socket is offline
                 if (typeof sendNotificationToUser === 'function') {
@@ -1008,7 +1228,7 @@ socket.on('requestRideResend', async ({ rideId, driverId }) => {
   {
     type: 'RIDE_ACCEPTED',
     rideId,
-    sentAt: new Date().toISOString(),
+    sentAt: Date.now().toString(),
   }
 );
                 }
@@ -1024,10 +1244,11 @@ socket.on('requestRideResend', async ({ rideId, driverId }) => {
     latitude: rideDetails.rows[0].pickup_lat,
     longitude: rideDetails.rows[0].pickup_lon,
     address: rideDetails.rows[0].pickup_address
-  }
+  },
+   passengerName: passengerName
 });
 
-        console.log(`✅ Driver ${driverId} accepted ${rideId} for passenger ${passengerId}`);
+        console.log(`✅ Driver ${driverId} accepted ${rideId} for passenger ${passengerName}`);
 
     } catch (e) {
         console.error('driverAccept error:', e);
@@ -1044,6 +1265,17 @@ socket.on('requestRideResend', async ({ rideId, driverId }) => {
 		try {
 		  await pool.query(`UPDATE drivers SET rejected_count = COALESCE(rejected_count, 0) + 1 WHERE user_id = $1`, [driverId]);
 		} catch (e) { console.warn(`increment rejected_count failed for ${driverId}:`, e.message); }
+		
+		const statusCheck = await pool.query(
+  `SELECT status FROM rides WHERE external_id = $1`,
+  [rideId]
+);
+
+if (statusCheck.rows[0]?.status !== 'PENDING') {
+  console.log('❌ Rematch aborted, ride not pending');
+  return;
+}
+
 
 		// 2. Fetch ride details needed for the rematch.
 		const rideQuery = await pool.query(
@@ -1058,7 +1290,7 @@ socket.on('requestRideResend', async ({ rideId, driverId }) => {
 		}
 		const rideDetails = rideQuery.rows[0];
 		const passengerId = rideDetails.passenger_id?.toString();
-		const passengerSocketId = passengerId ? activePassengers[passengerId] : null;
+		const passengerSocketId = activePassengers[passengerId]?.socketId;
 		const pickupLat = Number(rideDetails.pickup_lat);
 		const pickupLon = Number(rideDetails.pickup_lon);
 		const vehicleType = rideDetails.vehicle_type;
@@ -1083,59 +1315,185 @@ socket.on('requestRideResend', async ({ rideId, driverId }) => {
 
 		// Driver cancels after accepting -> start rematch
 		// payload: { rideId, driverId, reason? }
+		// socket.on('driverCancel', async (payload = {}) => {
+		  // try {
+			// const rideId = payload.rideId?.toString();
+			// const driverId = payload.driverId?.toString();
+			// const reason = payload.reason || 'cancelled_by_driver';
+			// if (!rideId || !driverId) return;
+
+			// // confirm current assignment
+			// const q = await pool.query(`SELECT driver_id, status FROM rides WHERE external_id = $1 LIMIT 1`, [rideId]);
+			// if (!q.rows.length) return;
+			// const row = q.rows[0];
+			// if (!row.driver_id || String(row.driver_id) !== String(driverId)) {
+			  // console.log(`driverCancel: ignoring since ride driver mismatch for ${rideId}`);
+			  // return;
+			// }
+
+			// // clear driver and set back to PENDING
+			// await pool.query(
+			  // `UPDATE rides SET status='PENDING', driver_id=NULL, cancelled_at=NOW(), cancelled_by='DRIVER' WHERE external_id = $1 AND driver_id = $2`,
+			  // [rideId, driverId]
+			// );
+
+			// // increment rejected_count for cancelling driver
+			// try {
+			  // await pool.query(`UPDATE drivers SET rejected_count = COALESCE(rejected_count,0) + 1 WHERE user_id = $1`, [driverId]);
+			// } catch (e) { console.warn('increment rejected_count failed:', e.message); }
+
+			// // fetch passenger & pickup location & vehicle_type for rematch
+			// const pQ = await pool.query(`SELECT passenger_id, ST_Y(pickup_location::geometry) AS pickup_lat, ST_X(pickup_location::geometry) AS pickup_lon, vehicle_type FROM rides WHERE external_id=$1 LIMIT 1`, [rideId]);
+			// const passengerId = pQ.rows[0]?.passenger_id?.toString();
+			// const passengerSocketId = activePassengers[passengerId]?.socketId;
+			// if (passengerSocketId) {
+			  // io.to(passengerSocketId).emit('driverCancelled', { rideId, driverId, reason });
+			  // io.to(passengerSocketId).emit('rematchInitiated', { rideId, reason });
+			// }
+
+			// const pickupLat = Number(pQ.rows[0]?.pickup_lat || 0);
+			// const pickupLon = Number(pQ.rows[0]?.pickup_lon || 0);
+			// const vehicleType = pQ.rows[0]?.vehicle_type;
+
+			// // start rematch in background excluding cancelling driver
+			// startRematchRounds(rideId, passengerSocketId, vehicleType, pickupLat, pickupLon, [driverId]);
+
+			// // acknowledge cancelling driver
+			// socket.emit('driverCancelAck', {
+  // rideId,
+  // message: 'Ride cancelled. Finding another driver.'
+// });
+			// console.log(`🚫 Driver ${driverId} cancelled ride ${rideId} — rematch started`);
+		  // } catch (e) {
+			// console.warn('driverCancel error:', e);
+		  // }
+		// });
+		
 		socket.on('driverCancel', async (payload = {}) => {
-		  try {
-			const rideId = payload.rideId?.toString();
-			const driverId = payload.driverId?.toString();
-			const reason = payload.reason || 'cancelled_by_driver';
-			if (!rideId || !driverId) return;
+  try {
+    const rideId = payload.rideId?.toString();
+    const driverId = payload.driverId?.toString();
+    const reason = payload.reason || 'cancelled_by_driver';
+    if (!rideId || !driverId) return;
 
-			// confirm current assignment
-			const q = await pool.query(`SELECT driver_id, status FROM rides WHERE external_id = $1 LIMIT 1`, [rideId]);
-			if (!q.rows.length) return;
-			const row = q.rows[0];
-			if (!row.driver_id || String(row.driver_id) !== String(driverId)) {
-			  console.log(`driverCancel: ignoring since ride driver mismatch for ${rideId}`);
-			  return;
-			}
+    const isScheduledRide = rideId.startsWith('sched_');
 
-			// clear driver and set back to PENDING
-			await pool.query(
-			  `UPDATE rides SET status='PENDING', driver_id=NULL, cancelled_at=NOW(), cancelled_by='DRIVER' WHERE external_id = $1 AND driver_id = $2`,
-			  [rideId, driverId]
-			);
+    // =====================================================
+    // 🟣 SCHEDULED RIDE CANCEL (SAFE)
+    // =====================================================
+    if (isScheduledRide) {
+      const q = await pool.query(
+        `SELECT driver_id, passenger_id
+         FROM scheduled_rides
+         WHERE external_id = $1
+         LIMIT 1`,
+        [rideId]
+      );
 
-			// increment rejected_count for cancelling driver
-			try {
-			  await pool.query(`UPDATE drivers SET rejected_count = COALESCE(rejected_count,0) + 1 WHERE user_id = $1`, [driverId]);
-			} catch (e) { console.warn('increment rejected_count failed:', e.message); }
+      if (!q.rows.length) return;
 
-			// fetch passenger & pickup location & vehicle_type for rematch
-			const pQ = await pool.query(`SELECT passenger_id, ST_Y(pickup_location::geometry) AS pickup_lat, ST_X(pickup_location::geometry) AS pickup_lon, vehicle_type FROM rides WHERE external_id=$1 LIMIT 1`, [rideId]);
-			const passengerId = pQ.rows[0]?.passenger_id?.toString();
-			const passengerSocketId = passengerId ? activePassengers[passengerId] : null;
-			if (passengerSocketId) {
-			  io.to(passengerSocketId).emit('driverCancelled', { rideId, driverId, reason });
-			  io.to(passengerSocketId).emit('rematchInitiated', { rideId, reason });
-			}
+      if (String(q.rows[0].driver_id) !== String(driverId)) {
+        console.log(`driverCancel ignored (scheduled): driver mismatch`);
+        return;
+      }
 
-			const pickupLat = Number(pQ.rows[0]?.pickup_lat || 0);
-			const pickupLon = Number(pQ.rows[0]?.pickup_lon || 0);
-			const vehicleType = pQ.rows[0]?.vehicle_type;
+      await pool.query(
+        `UPDATE scheduled_rides
+         SET status = 'CANCELLED_BY_DRIVER',
+             is_locked = FALSE,
+             locked_until = NULL,
+             cancelled_at = NOW()
+         WHERE external_id = $1`,
+        [rideId]
+      );
 
-			// start rematch in background excluding cancelling driver
-			startRematchRounds(rideId, passengerSocketId, vehicleType, pickupLat, pickupLon, [driverId]);
+      const passengerId = q.rows[0].passenger_id?.toString();
+      const passengerSocketId = activePassengers[passengerId]?.socketId;
 
-			// acknowledge cancelling driver
-			socket.emit('driverCancelAck', {
-  rideId,
-  message: 'Ride cancelled. Finding another driver.'
+      if (passengerSocketId) {
+        io.to(passengerSocketId).emit('ride-status-update', {
+          rideId,
+          status: 'CANCELLED_BY_DRIVER',
+          message: 'Driver cancelled. Finding another driver.',
+        });
+      }
+
+      socket.emit('driverCancelAck', {
+        rideId,
+        message: 'Scheduled ride cancelled successfully.',
+      });
+
+      console.log(`🚫 Scheduled ride ${rideId} cancelled by driver ${driverId}`);
+      return; // ⛔ VERY IMPORTANT
+    }
+
+    // =====================================================
+    // 🟢 NORMAL RIDE CANCEL (YOUR ORIGINAL LOGIC — UNTOUCHED)
+    // =====================================================
+    const q = await pool.query(
+      `SELECT driver_id, status FROM rides WHERE external_id = $1 LIMIT 1`,
+      [rideId]
+    );
+    if (!q.rows.length) return;
+
+    if (String(q.rows[0].driver_id) !== String(driverId)) {
+      console.log(`driverCancel ignored (normal): driver mismatch`);
+      return;
+    }
+
+    await pool.query(
+      `UPDATE rides
+       SET status='PENDING',
+           driver_id=NULL,
+           cancelled_at=NOW(),
+           cancelled_by='DRIVER'
+       WHERE external_id=$1`,
+      [rideId]
+    );
+
+    const pQ = await pool.query(
+      `SELECT passenger_id,
+              ST_Y(pickup_location::geometry) AS pickup_lat,
+              ST_X(pickup_location::geometry) AS pickup_lon,
+              vehicle_type
+       FROM rides WHERE external_id=$1`,
+      [rideId]
+    );
+
+    const passengerId = pQ.rows[0]?.passenger_id?.toString();
+    const passengerSocketId = activePassengers[passengerId]?.socketId;
+
+    if (passengerSocketId) {
+      io.to(passengerSocketId).emit('driverCancelled', { rideId, driverId, reason });
+      io.to(passengerSocketId).emit('rematchInitiated', { rideId, reason });
+    }
+
+    startRematchRounds(
+      rideId,
+      passengerSocketId,
+      pQ.rows[0].vehicle_type,
+      pQ.rows[0].pickup_lat,
+      pQ.rows[0].pickup_lon,
+      [driverId]
+    );
+
+    socket.emit('driverCancelAck', {
+      rideId,
+      message: 'Ride cancelled. Finding another driver.',
+    });
+
+    console.log(`🚫 Normal ride ${rideId} cancelled by driver ${driverId}`);
+	delete lastRouteSnapshotAt[String(rideId)];
+delete global.routeDeviationConsent?.[rideId];
+
+
+
+  } catch (e) {
+    console.warn('driverCancel error:', e);
+  }
 });
-			console.log(`🚫 Driver ${driverId} cancelled ride ${rideId} — rematch started`);
-		  } catch (e) {
-			console.warn('driverCancel error:', e);
-		  }
-		});
+
+		
 
 		// socket.on('cancelRide', async (payload = {}) => {
 		  // try {
@@ -1159,101 +1517,181 @@ socket.on('requestRideResend', async ({ rideId, driverId }) => {
 		
 		// ✅ REPLACE the 'cancelRide' handler in socket.js with this one
 
-	socket.on('cancelRide', async (payload = {}) => {
-	  try {
-		const rideId = payload.rideId?.toString();
-		const passengerId = payload.userId?.toString() || payload.passengerId?.toString();
+	// socket.on('cancelRide', async (payload = {}) => {
+	  // try {
+		// const rideId = payload.rideId?.toString();
+		// const passengerId = payload.userId?.toString() || payload.passengerId?.toString();
 
-		if (!rideId) {
-		  console.warn('cancelRide called without a rideId.');
-		  return;
-		}
+		// if (!rideId) {
+		  // console.warn('cancelRide called without a rideId.');
+		  // return;
+		// }
 
-		console.log(`❌ Passenger ${passengerId || '?'} is attempting to cancel ride ${rideId}`);
+		// console.log(`❌ Passenger ${passengerId || '?'} is attempting to cancel ride ${rideId}`);
 
-		// First, get the driver_id BEFORE updating the ride status
-		const rideQuery = await pool.query(
-			`SELECT driver_id FROM rides WHERE external_id = $1`,
-			[rideId]
-		);
+		// // First, get the driver_id BEFORE updating the ride status
+		// const rideQuery = await pool.query(
+			// `SELECT driver_id FROM rides WHERE external_id = $1`,
+			// [rideId]
+		// );
 
-		const driverId = rideQuery.rows[0]?.driver_id?.toString();
+		// const driverId = rideQuery.rows[0]?.driver_id?.toString();
 
-		// Now, update the ride status in the database
-		await pool.query(
-		  `UPDATE rides
-			  SET status = 'CANCELLED',
-				  cancelled_at = NOW(),
-				  cancelled_by = 'PASSENGER'
-			WHERE external_id = $1`,
-		  [rideId]
-		);
+		// // Now, update the ride status in the database
+		// await pool.query(
+		  // `UPDATE rides
+			  // SET status = 'CANCELLED',
+				  // cancelled_at = NOW(),
+				  // cancelled_by = 'PASSENGER'
+			// WHERE external_id = $1`,
+		  // [rideId]
+		// );
 
-		// --- THIS IS THE CRUCIAL FIX ---
-		// If a driver was assigned to this ride, notify them.
-		if (driverId) {
-		 const dKey = String(driverId);
-const driverSocketId = activeDrivers[dKey]?.socketId;
-		  if (driverSocketId) {
-			console.log(`📢 Notifying driver ${driverId} on socket ${driverSocketId} that the ride was cancelled.`);
-			// Use a clear, specific event name
-			io.to(driverSocketId).emit('rideCancelledByPassenger', {
-			  rideId: rideId,
-			  message: 'The passenger has cancelled the ride.'
-			});
-		  } else {
-			console.log(`Driver ${driverId} was assigned but is not actively connected.`);
-		  }
-		}
-		// --- END OF FIX ---
-		 delete rideNotifiedDrivers[String(rideId)];
+		// // --- THIS IS THE CRUCIAL FIX ---
+		// // If a driver was assigned to this ride, notify them.
+		// if (driverId) {
+		 // const dKey = String(driverId);
+// const driverSocketId = activeDrivers[dKey]?.socketId;
+		  // if (driverSocketId) {
+			// console.log(`📢 Notifying driver ${driverId} on socket ${driverSocketId} that the ride was cancelled.`);
+			// // Use a clear, specific event name
+			// io.to(driverSocketId).emit('rideCancelledByPassenger', {
+			  // rideId: rideId,
+			    // type: rideId.startsWith('sched_') ? 'SCHEDULED' : 'NORMAL',
+			  // message: 'The passenger has cancelled the ride.'
+			// });
+			// io.to(driverSocketId).emit('dismissRideRequest', {
+  // rideId,
+  // reason: 'cancelled_by_passenger'
+// });
+			
+		  // } else {
+			// console.log(`Driver ${driverId} was assigned but is not actively connected.`);
+		  // }
+		// }
+		// // --- END OF FIX ---
+		 // delete rideNotifiedDrivers[String(rideId)];
 
-	  } catch (e) {
-		console.error('Error during cancelRide:', e);
-	  }
+	  // } catch (e) {
+		// console.error('Error during cancelRide:', e);
+	  // }
 	  
 	 
 
-	});
-
-socket.on('cancelRideSearch', async (payload) => {
+	// });
+	
+	
+	socket.on('cancelRide', async (payload = {}) => {
   try {
-    const rideId = payload.rideId?.toString();
+    const rideId =
+      payload.rideId?.toString();
+    const passengerId =
+      payload.userId?.toString() || payload.passengerId?.toString();
 
-    if (!rideId) {
-      console.warn('cancelRideSearch called without rideId.');
-      return;
+    if (!rideId) return;
+
+    console.log(`❌ Passenger ${passengerId || '?'} cancelling ${rideId}`);
+
+    const isScheduledRide = rideId.startsWith('sched_');
+
+    // =====================================================
+    // 🟣 SCHEDULED RIDE (100% SAFE – SEPARATE TABLE)
+    // =====================================================
+    if (isScheduledRide) {
+      await pool.query(
+        `UPDATE scheduled_rides
+         SET status='CANCELLED',
+             cancelled_at=NOW(),
+             cancelled_by='PASSENGER'
+         WHERE external_id=$1`,
+        [rideId]
+      );
+
+      const q = await pool.query(
+        `SELECT driver_id FROM scheduled_rides WHERE external_id=$1`,
+        [rideId]
+      );
+
+      const driverId = q.rows[0]?.driver_id?.toString();
+      const dSid = activeDrivers[driverId]?.socketId;
+
+      if (dSid) {
+        io.to(dSid).emit('rideCancelledByPassenger', {
+          rideId,
+          type: 'SCHEDULED'
+        });
+      }
+
+      delete global.routeDeviationConsent?.[rideId];
+      console.log(`🟣 Scheduled ride ${rideId} cancelled`);
+      return; // ⛔ STOP HERE (important)
     }
 
-    console.log(`❌ Passenger cancelled search for ride ${rideId}`);
+    // =====================================================
+    // 🟢 NORMAL RIDE
+    // =====================================================
 
+    // 1️⃣ get assigned driver BEFORE updating status
+    const rideRes = await pool.query(
+      `SELECT driver_id FROM rides WHERE external_id=$1`,
+      [rideId]
+    );
+
+    const driverId = rideRes.rows[0]?.driver_id?.toString();
+
+    // 2️⃣ update DB
     await pool.query(
       `UPDATE rides
        SET status='CANCELLED',
            cancelled_at=NOW(),
            cancelled_by='PASSENGER'
-       WHERE external_id=$1 AND status='PENDING'`,
+       WHERE external_id=$1`,
       [rideId]
     );
 
-    const notifiedDrivers = rideNotifiedDrivers[String(rideId)] || new Set();
-
-    for (const driverId of notifiedDrivers) {
-      const d = activeDrivers[String(driverId)];
-      if (d?.socketId) {
-        io.to(d.socketId).emit('rideCancelledByPassenger', {
+    // 3️⃣ 🔥 CRITICAL FIX: notify ACCEPTED DRIVER directly
+    if (driverId && activeDrivers[driverId]?.socketId) {
+      io.to(activeDrivers[driverId].socketId).emit(
+        'rideCancelledByPassenger',
+        {
           rideId,
-          message: 'The passenger cancelled the search request.'
+          type: 'NORMAL'
+        }
+      );
+
+      io.to(activeDrivers[driverId].socketId).emit(
+        'dismissRideRequest',
+        {
+          rideId,
+          reason: 'cancelled_by_passenger'
+        }
+      );
+
+      console.log(`📢 Cancel sent to active driver ${driverId}`);
+    }
+
+    // 4️⃣ also dismiss any pending offers (safe)
+    const notifiedSet = rideNotifiedDrivers[rideId] || new Set();
+    for (const dId of notifiedSet) {
+      const d = activeDrivers[dId];
+      if (d?.socketId) {
+        io.to(d.socketId).emit('dismissRideRequest', {
+          rideId,
+          reason: 'cancelled_by_passenger'
         });
       }
     }
 
-    delete rideNotifiedDrivers[String(rideId)];
+    // 5️⃣ cleanup
+    delete rideNotifiedDrivers[rideId];
+    delete global.routeDeviationConsent?.[rideId];
 
   } catch (e) {
-    console.error('Error during cancelRideSearch:', e);
+    console.error('cancelRide error:', e);
   }
 });
+
+
 
 socket.on('driver-check-active-ride', async ({ driverId }) => {
   try {
@@ -1261,7 +1699,7 @@ socket.on('driver-check-active-ride', async ({ driverId }) => {
       `SELECT external_id
        FROM rides
        WHERE driver_id = $1
-         AND status IN ('ACCEPTED', 'IN_TRANSIT')
+         AND status IN ('IN_TRANSIT')
        LIMIT 1`,
       [driverId]
     );
@@ -1342,7 +1780,7 @@ socket.on('driver-check-active-ride', async ({ driverId }) => {
     // // Send destination data to the driver (this part is correct)
     // const passengerId = ride.passenger_id?.toString();
     // const driverSocketId = activeDrivers[driverId]?.socketId;
-    // const passengerSocketId = passengerId ? activePassengers[passengerId] : null;
+    // const passengerSocketId = activePassengers[passengerId]?.socketId;
 
     // if (driverSocketId) {
       // const destinationPayload = {
@@ -1420,6 +1858,14 @@ socket.on('verifyOtp', async (data) => {
       [rideId]
     );
 
+if (activeDrivers[String(driverId)]) {
+  activeDrivers[String(driverId)].isOnActiveRide = true;
+}
+
+// 🧹 IMPORTANT: purana ride ka snapshot memory clean
+delete lastRouteSnapshotAt[String(rideId)];
+
+
     // ✅ USE IT HERE (DON’T REDECLARE)
     if (driverSocketId) {
       io.to(driverSocketId).emit('otpVerified', {
@@ -1432,14 +1878,21 @@ socket.on('verifyOtp', async (data) => {
     }
 
     const passengerId = ride.passenger_id?.toString();
-    const passengerSocketId = activePassengers[passengerId];
+    const passengerSocketId = activePassengers[passengerId]?.socketId;
 
-    if (passengerSocketId) {
-      io.to(passengerSocketId).emit('rideStarted', {
-        rideId,
-        startedAt: new Date().toISOString()
-      });
-    }
+  if (passengerSocketId) {
+  io.to(passengerSocketId).emit('rideStarted', {
+    rideId,
+    status: 'IN_TRANSIT',
+    startedAt: new Date().toISOString()
+  });
+
+  io.to(passengerSocketId).emit('ride-status-update', {
+    rideId,
+    status: 'IN_TRANSIT'
+  });
+}
+
 
   } catch (e) {
     console.error('verifyOtp error:', e);
@@ -1520,7 +1973,7 @@ socket.on('verifyOtp', async (data) => {
     // // --- The rest of the logic is for notifying the apps ---
     // const passengerId = s_ride.passenger_id?.toString();
     // const driverSocketId = activeDrivers[driverId]?.socketId;
-    // const passengerSocketId = passengerId ? activePassengers[passengerId] : null;
+    // const passengerSocketId = activePassengers[passengerId]?.socketId;
 
     // if (driverSocketId) {
       // // This is the event the driver app is waiting for to show the route.
@@ -1626,9 +2079,13 @@ const driverSocketId = activeDrivers[dKey]?.socketId;
 
     await client.query(`UPDATE scheduled_rides SET status='IN_TRANSIT' WHERE external_id=$1`, [rideId]);
     await client.query(`UPDATE rides SET status='IN_TRANSIT', started_at=NOW() WHERE external_id=$1`, [rideId]);
+	
+if (activeDrivers[String(driverId)]) {
+  activeDrivers[String(driverId)].isOnActiveRide = true;
+}
 
     const passengerId = s_ride.passenger_id.toString();
-    const passengerSocketId = activePassengers[passengerId];
+    const passengerSocketId = activePassengers[passengerId]?.socketId;
     if (driverSocketId) {
       io.to(driverSocketId).emit("otpVerified", {
         rideId,
@@ -1645,6 +2102,14 @@ const driverSocketId = activeDrivers[dKey]?.socketId;
         rideId,
         startedAt: new Date().toISOString()
       });
+	  
+	  if (passengerSocketId) {
+  io.to(passengerSocketId).emit('ride-status-update', {
+    rideId,
+    status: 'IN_TRANSIT'
+  });
+}
+
     }
 
     await client.query("COMMIT");
@@ -1672,7 +2137,7 @@ socket.on('completeRide', async (payload = {}) => {
     if (!rideId || !driverId) {
       console.warn('completeRide called with missing rideId or driverId');
       await client.query('ROLLBACK');
-      client.release();
+      //client.release();
       return;
     }
 
@@ -1687,7 +2152,7 @@ socket.on('completeRide', async (payload = {}) => {
     if (rideQuery.rows.length === 0) {
       console.error(`completeRide: Ride with ID ${rideId} not found.`);
       await client.query('ROLLBACK');
-      client.release();
+      //client.release();
       return;
     }
     const rideRow = rideQuery.rows[0];
@@ -1784,7 +2249,7 @@ const finalRoundedR = Math.round(totalExactR);
 		    total_paise = EXCLUDED.total_paise, rounded_rupees = EXCLUDED.rounded_rupees
 	      RETURNING id`,
 		  [
-            rideRow.external_id, rideRow.passenger_id, rideRow.driver_id, rideRow.vehicle_type,
+            rideRow.external_id, rideRow.passenger_id, Number(driverId), rideRow.vehicle_type,
   rideRow.pickup_address, rideRow.dropoff_address, rideRow.requested_at, new Date(),
 	baseExactR,        // decimal
   surgeR_exact,      // decimal
@@ -1801,7 +2266,13 @@ const finalRoundedR = Math.round(totalExactR);
 
 	// --- Your perfect finalize, unlock, and notify logic remains ---
 	await client.query('COMMIT');
-		
+	delete lastRouteSnapshotAt[String(rideId)];
+
+
+		if (activeDrivers[String(driverId)]) {
+  activeDrivers[String(driverId)].isOnActiveRide = false;
+}
+
 	const unlockQuery = await client.query(
         `UPDATE scheduled_rides SET is_locked = FALSE, locked_until = NULL WHERE driver_id = $1 AND is_locked = TRUE RETURNING external_id`,
        [Number(driverId)]
@@ -1816,11 +2287,21 @@ const finalRoundedR = Math.round(totalExactR);
 
 	console.log(`🏁 Completed ${rideId}, fare=${finalTotalR}, cash=${!!paidByCash}`);
 	if (passengerId) {
-		const pSid = activePassengers[passengerId];
+		const pSid = activePassengers[passengerId]?.socketId;
 		if (pSid) io.to(pSid).emit('rideCompleted', { rideId, driverId, finalFare: finalTotalR, paidByCash: !!paidByCash });
 	}
 	const dSid = activeDrivers[driverId]?.socketId;
-	if (dSid) io.to(dSid).emit('rideCompleted', { rideId, finalFare: finalTotalR, paidByCash: !!paidByCash });
+	if (dSid) io.to(dSid).emit('rideCompleted', { rideId, finalFare: finalTotalR, paidByCash: !!paidByCash,
+	passengerId: rideRow.passenger_id?.toString()});
+	
+	delete global.routeDeviationConsent?.[rideId];
+	delete sosTimers[rideId];
+	
+	await pool.query(
+  `UPDATE rides SET is_sos_active = FALSE WHERE external_id = $1`,
+  [rideId]
+);
+
 
   } catch (e) {
 	await client.query('ROLLBACK');
@@ -1828,6 +2309,64 @@ const finalRoundedR = Math.round(totalExactR);
   } finally {
 	client.release();
   }
+});
+
+//passenger rating
+// ✅✅✅ PASTE THIS ENTIRE NEW, GLORIOUS LISTENER INTO socket.js ✅✅✅
+
+socket.on('submitDriverRating', async ({ rideId, driverId, passengerId, rating, review, tags }) => {
+    if (!rideId || !passengerId || !driverId || !rating) {
+        console.warn('[submitDriverRating] Received with missing data. Aborting.');
+        return;
+    }
+
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        // Step 1: Insert the main rating into your new 'passenger_ratings' table
+        await client.query(
+            `INSERT INTO passenger_ratings (ride_external_id, driver_id, passenger_id, rating, review)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (ride_external_id) DO NOTHING`, // This prevents errors if submitted twice
+            [rideId, driverId, passengerId, rating, review]
+        );
+
+        // Step 2: Insert the beautiful checkbox tags into 'ride_rating_tags'
+        if (tags && Array.isArray(tags) && tags.length > 0) {
+            for (const tag of tags) {
+                await client.query(
+                    `INSERT INTO ride_rating_tags (ride_external_id, rated_by_role, tag_key, tag_value)
+                     VALUES ($1, 'DRIVER', $2, $3)
+                     ON CONFLICT (ride_external_id, rated_by_role, tag_value) DO NOTHING`,
+                    [rideId, tag.key, tag.value]
+                );
+            }
+        }
+		
+		await client.query(`
+  UPDATE passenger_ratings
+  SET
+    total_ratings = total_ratings + 1,
+    avg_rating = ROUND(
+      ((avg_rating * total_ratings) + $1) / (total_ratings + 1),
+      1
+    )
+  WHERE id = $2
+`, [rating, passengerId]);
+
+
+        // As you commanded, we DO NOT update the users table. That step is removed.
+
+        await client.query('COMMIT');
+        console.log(`✅ Driver ${driverId} rated passenger ${passengerId} for ride ${rideId}`);
+
+    } catch (e) {
+        await client.query('ROLLBACK');
+        console.error('❌ Error in submitDriverRating:', e);
+    } finally {
+        client.release();
+    }
 });
 
 	
@@ -1858,7 +2397,7 @@ const finalRoundedR = Math.round(totalExactR);
 
 		// Is the recipient a passenger?
 		if (activePassengers[recipientId]) {
-			recipientSocketId = activePassengers[recipientId];
+			recipientSocketId = activePassengers[recipientId].socketId;
 		}
 		// Or is the recipient a driver?
 		else if (activeDrivers[String(recipientId)]) {
@@ -1881,13 +2420,6 @@ const finalRoundedR = Math.round(totalExactR);
 		}
 	});
 	
-	// In your socket.on('accept-scheduled-ride', ...) handler
-// In socket.js
-// ✅ REPLACE your 'accept-scheduled-ride' handler with this complete and correct version.
-// ❌ DELETE your old 'accept-scheduled-ride' handler.
-// ✅ PASTE this final, correct version.
-// ❌ DELETE your old 'accept-scheduled-ride' handler.
-// ✅ PASTE this new, final, and correct version in its place.
 
 socket.on('accept-scheduled-ride', async (data) => {
     const { rideId, driverId } = data;
@@ -1905,15 +2437,23 @@ socket.on('accept-scheduled-ride', async (data) => {
         // 1. Lock the ride and get passenger_id.
         const rideUpdateResult = await client.query(
             `UPDATE scheduled_rides
-             SET
-               status = 'ACCEPTED',
-               driver_id = $1,
-               is_locked = TRUE,
-               locked_until = scheduled_pickup_time
-             WHERE external_id = $2 AND status = 'SEARCHING'
-             RETURNING passenger_id, locked_until, pickup_address, dropoff_address, scheduled_pickup_time, estimated_fare, otp,
-                       ST_Y(pickup_location::geometry) as pickup_lat,
-                       ST_X(pickup_location::geometry) as pickup_lon`,
+  SET
+    status = 'ACCEPTED',
+    driver_id = $1,
+    is_locked = TRUE,
+    locked_until = NULL
+  WHERE external_id = $2
+    AND status = 'SEARCHING'
+  RETURNING
+    passenger_id,
+	vehicle_type,
+    pickup_address,
+    dropoff_address,
+    scheduled_pickup_time,
+    estimated_fare,
+    otp,
+    ST_Y(pickup_location::geometry) as pickup_lat,
+    ST_X(pickup_location::geometry) as pickup_lon`,
             [driverId, rideId]
         );
 
@@ -1922,7 +2462,31 @@ socket.on('accept-scheduled-ride', async (data) => {
         }
 
         const rideDetails = rideUpdateResult.rows[0];
+	// Fetch driver's vehicle_type from DB (source of truth)
+const driverVehicleRes = await client.query(
+  `SELECT vehicle_type FROM drivers WHERE user_id = $1`,
+  [driverId]
+);
+
+const driverVehicleType =
+  driverVehicleRes.rows[0]?.vehicle_type?.toUpperCase();
+
+const rideVehicleType =
+  rideDetails.vehicle_type?.toUpperCase();
+
+if (!driverVehicleType || !rideVehicleType) {
+  throw new Error('Vehicle type validation failed');
+}
+
+if (driverVehicleType !== rideVehicleType) {
+  throw new Error(
+    `Vehicle type mismatch: ride=${rideVehicleType}, driver=${driverVehicleType}`
+  );
+}
+
+		
         const passengerId = rideDetails.passenger_id;
+		
 
         // 2. ✅ FETCH THE DRIVER'S FULL DETAILS
         const driverDetailsQuery = await client.query(
@@ -1941,50 +2505,40 @@ socket.on('accept-scheduled-ride', async (data) => {
             [driverId]
         );
         const driverDetails = driverDetailsQuery.rows[0] || {};
+		
+        let passengerName = 'Passenger'; // A safe default name
+        if (passengerId) {
+            try {
+                // Command the database to find the passenger's name
+                const passengerQuery = await client.query(
+                    `SELECT name FROM users WHERE id = $1`,
+                    [passengerId]
+                );
+                
+                // If a name is found, we use it!
+                if (passengerQuery.rows.length > 0) {
+                    passengerName = passengerQuery.rows[0].name;
+                }
+            } catch (e) {
+                console.error("Failed to fetch passenger name for scheduled ride:", e);
+                // If it fails, the name will remain 'Passenger', which is a safe fallback.
+            }
+        }
+		
+		
         const driverLocation = activeDrivers[driverId] ? { latitude: activeDrivers[driverId].latitude, longitude: activeDrivers[driverId].longitude } : null;
 		console.log('🧠 activePassengers snapshot:', activePassengers);
 		console.log('🧠 passengerId:', passengerId);
-
-        // 3. ✅✅✅ NOTIFY PASSENGER WITH ALL DETAILS (THE CRITICAL FIX) ✅✅✅
-        const pSock = activePassengers[passengerId];
-        if (pSock) {
-            io.to(pSock).emit('ride-status-update', {
-                rideId: rideId,
-                status: 'ACCEPTED',
-                // --- All the data the Flutter app is waiting for ---
-                driver_id: driverId,
-                driver_name: driverDetails.driver_name,
-                driver_contact: driverDetails.driver_contact,
-                vehicle_model: driverDetails.vehicle_model,
-                vehicle_number: driverDetails.vehicle_number,
-                rating: driverDetails.rating,
-                driver_location: driverLocation, // Send initial location
-				 driver_photo_url: toPublicUrl(driverDetails.driver_photo_url),
-				vehicle_photo_url: toPublicUrl(driverDetails.vehicle_photo_url),
-            });
-            console.log(`✅ Notified Passenger ${passengerId} with full driver details.`);
-        }
-		await sendNotificationToUser(
-  passengerId,
-  'Your Scheduled Ride is Confirmed!',
-  'A driver has been assigned.',
-  {
-    type: 'SCHEDULED_ACCEPTED',
-    rideId,
-    sentAt: new Date().toISOString(),
-  }
-);
-
-    console.log(`✅ Sent PUSH NOTIFICATION to passenger ${passengerId} for scheduled ride confirmation.`);
-
-
-        // 4. Acknowledge the DRIVER (This part is already correct in your code)
-        socket.emit('driver-locked', {
+		
+		//upcoming ride panel schedule ride.
+		
+		socket.emit('driver-locked', {
             'message': 'You have an upcoming scheduled ride.',
             'lockedUntil': rideDetails.locked_until,
             'rideDetails': {
                  rideId: rideId,
                  passengerId: passengerId,
+				 passengerName: passengerName,
                  otp: rideDetails.otp,
                  pickupAddress: rideDetails.pickup_address,
                  dropoffAddress: rideDetails.dropoff_address,
@@ -1994,9 +2548,75 @@ socket.on('accept-scheduled-ride', async (data) => {
                  pickupLongitude: rideDetails.pickup_lon
             }
         });
-        console.log(`✅ Acknowledged Driver ${driverId} and sent passenger pickup details.`);
+        console.log(`✅ [INSTANT]  Acknowledged Driver ${driverId} and sent passenger pickup details.`);
+		
+
+        // 3. ✅✅✅ NOTIFY PASSENGER WITH ALL DETAILS (THE CRITICAL FIX) ✅✅✅
+       const pState = activePassengers[passengerId];
+
+// 🟢 Passenger app OPEN → SOCKET ONLY
+if (pState?.socketId && pState.isForeground === true) {
+  io.to(pState.socketId).emit('ride-status-update', {
+    rideId: rideId,
+    status: 'ACCEPTED',
+
+    // 🔥 full driver data (same as pehle)
+    driver_id: driverId,
+    driver_name: driverDetails.driver_name,
+    driver_contact: driverDetails.driver_contact,
+    vehicle_model: driverDetails.vehicle_model,
+    vehicle_number: driverDetails.vehicle_number,
+    rating: driverDetails.rating,
+    driver_location: driverLocation,
+    driver_photo_url: toPublicUrl(driverDetails.driver_photo_url),
+    vehicle_photo_url: toPublicUrl(driverDetails.vehicle_photo_url),
+  });
+
+  console.log(`🟢 Passenger ${passengerId} notified via SOCKET (foreground).`);
+}
+// 🔔 Passenger app BACKGROUND / KILLED → PUSH ONLY
+else {
+  await sendNotificationToUser(
+    passengerId,
+    'Your Scheduled Ride is Confirmed!',
+    'A driver has been assigned.',
+    {
+      type: 'SCHEDULED_ACCEPTED',
+      rideId,
+      sentAt: Date.now().toString(),
+    },
+	  { showNotification: true } 
+  );
+
+  console.log(`🔔 Passenger ${passengerId} notified via PUSH (background).`);
+}
+
+
+    console.log(`✅ Sent PUSH NOTIFICATION to passenger ${passengerId} for scheduled ride confirmation.`);
+
+
+        // 4. Acknowledge the DRIVER (This part is already correct in your code)
+        
+// 🔥🔥🔥 DISMISS POPUP FOR OTHER DRIVERS (SCHEDULED RIDE) 🔥🔥🔥
+const notifiedSet = global.rideNotifiedDrivers?.[rideId] || new Set();
+
+for (const otherDriverId of notifiedSet) {
+  if (String(otherDriverId) === String(driverId)) continue;
+
+  const d = activeDrivers[String(otherDriverId)];
+  if (d?.socketId) {
+    io.to(d.socketId).emit('dismissRideRequest', {
+      rideId,
+      reason: 'accepted_by_other'
+    });
+  }
+}
+
+// 🧹 cleanup memory
+delete global.rideNotifiedDrivers?.[rideId];
 
         await client.query('COMMIT');
+		
 
     } catch (e) {
         await client.query('ROLLBACK');
@@ -2051,7 +2671,7 @@ socket.on('start-driving-to-scheduled-pickup', async (data) => {
 
         // Step 3: Notify the passenger with ALL the required details.
         if (passengerId) {
-            const pSock = activePassengers[passengerId]; // Assuming you have this map
+            const pSock = activePassengers[passengerId]?.socketId; // Assuming you have this map
             if (pSock) {
                 // ✅ THIS IS THE FIX ✅
                 // We now include all the details the Flutter app is waiting for.
@@ -2105,7 +2725,7 @@ socket.on('driver-arrived-for-scheduled-ride', async (data) => {
     const driverId = updateResult.rows[0].driver_id; // Get the driver's ID from the query result
 
     // --- NOTIFY PASSENGER (This part is correct) ---
-    const pSock = activePassengers[passengerId];
+    const pSock = activePassengers[passengerId]?.socketId;
     if (pSock) {
       io.to(pSock).emit('ride-arrived-otp', {
         rideId: rideId,
@@ -2134,6 +2754,406 @@ socket.emit('scheduledRideArrivedAck', {
   }
 });
 
+// for FCM added 12:13 am 17012026
+
+socket.on('driver-request-ride-resend', async ({ driverId, rideId }) => {
+  try {
+    const q = await pool.query(
+      `
+      SELECT
+        *,
+        ST_Y(pickup_location::geometry) AS pickup_lat,
+        ST_X(pickup_location::geometry) AS pickup_lng,
+        ST_Y(dropoff_location::geometry) AS drop_lat,
+        ST_X(dropoff_location::geometry) AS drop_lng
+      FROM rides
+      WHERE external_id = $1
+        AND status = 'PENDING'
+      `,
+      [rideId]
+    );
+
+    if (q.rows.length === 0) return;
+
+    const r = q.rows[0];
+
+    socket.emit('newRideRequest', {
+      rideId: r.external_id,
+      passengerId: r.passenger_id,
+      pickupAddress: r.pickup_address,
+      dropoffAddress: r.dropoff_address,
+
+      pickupLatitude: r.pickup_lat,
+      pickupLongitude: r.pickup_lng,
+      dropoffLatitude: r.drop_lat,
+      dropoffLongitude: r.drop_lng,
+
+      estimatedFare: r.estimated_fare,
+      distanceKm: r.distance_km,
+      vehicleType: r.vehicle_type,
+      surgeMultiplier: r.surge_multiplier ?? 1.0,
+
+      fromResync: true,
+    });
+
+// const dSid = activeDrivers[String(driverId)]?.socketId;
+// if (dSid) {
+  // io.to(dSid).emit('newRideRequest', payload);
+// }
+
+    console.log(`🔁 Resent ride ${rideId} to driver ${driverId}`);
+  } catch (e) {
+    console.error('driver-request-ride-resend error:', e);
+  }
+});
+
+
+//passenger and driver safety module start 
+
+async function logRouteSnapshot(pool, data) {
+  const {
+    rideExternalId,
+    latitude,
+    longitude,
+    speedKmph
+  } = data;
+
+  if (!rideExternalId) return;
+
+  await pool.query(
+    `
+    INSERT INTO ride_route_snapshots (
+      ride_external_id,
+      latitude,
+      longitude,
+      speed_kmph
+    ) VALUES ($1, $2, $3, $4)
+    `,
+    [rideExternalId, latitude, longitude, speedKmph]
+  );
+}
+
+
+async function getActiveRideIdForDriver(pool, driverId) {
+  const { rows } = await pool.query(
+    `
+    SELECT external_id
+    FROM rides
+    WHERE driver_id = $1
+      AND status='IN_TRANSIT'
+	  ORDER BY started_at DESC NULLS LAST
+    LIMIT 1
+    `,
+    [driverId]
+  );
+
+  return rows[0]?.external_id || null;
+}
+
+function shouldLogRouteSnapshot(rideExternalId) {
+  const key = String(rideExternalId);
+  const now = Date.now();
+
+  if (!lastRouteSnapshotAt[key] || now - lastRouteSnapshotAt[key] > 15000) {
+    lastRouteSnapshotAt[key] = now;
+    return true;
+  }
+  return false;
+}
+
+
+
+// 🛡️ ROUTE DEVIATION (SOFT) — OPTION A
+socket.on('route_deviation_soft', async (payload = {}) => {
+  try {
+	  
+	   if (process.env.NODE_ENV === 'production') {
+      console.log('❌ route_deviation_soft (manual) blocked in production');
+      return;
+    }
+	  
+    // ⛔ Guard: payload empty
+    if (!payload?.rideExternalId || !payload?.driverId) return;
+
+    // 👉 Delegate ALL logic (no brain here)
+    await SafetyService.handleRouteDeviationSoft(socket, payload);
+
+  } catch (err) {
+    console.error('❌ route_deviation_soft error:', err.message);
+  }
+});
+
+socket.on('register', ({ userId, role }) => {
+  if (role === 'passenger') {
+    socket.join(`passenger:${userId}`);
+    console.log(`✅ Passenger ${userId} joined room passenger:${userId}`);
+  }
+});
+
+
+socket.on('driver_route_explanation', async (payload = {}) => {
+	console.log('📨 driver_route_explanation received:', payload);
+  try {
+    const { rideExternalId, driverId, message } = payload;
+    if (!rideExternalId || !driverId || !message) return;
+
+    const q = await socket.dbPool.query(
+      `SELECT passenger_id
+       FROM rides
+       WHERE external_id = $1
+         AND driver_id = $2
+         AND status = 'IN_TRANSIT'
+       LIMIT 1`,
+      [rideExternalId, driverId]
+    );
+
+    if (!q.rows.length) return;
+
+    const passengerId = q.rows[0].passenger_id?.toString();
+
+    // 👉 Send confirmation popup to passenger
+    socket.to(`passenger:${passengerId}`).emit('route_change_confirmation', {
+      rideExternalId,
+      driverMessage: message
+    });
+
+  } catch (e) {
+    console.error('driver_route_explanation error:', e.message);
+  }
+});
+
+
+socket.on('route_change_decision', async (payload = {}) => {
+  try {
+    const { rideExternalId, passengerId, decision } = payload;
+    if (!rideExternalId || !passengerId || !decision) return;
+
+    // 1️⃣ Persist passenger decision (SOURCE OF TRUTH)
+    await pool.query(
+      `
+      INSERT INTO ride_safety_state (ride_external_id, passenger_decision, decision_at)
+      VALUES ($1, $2, NOW())
+      ON CONFLICT (ride_external_id)
+      DO UPDATE SET
+        passenger_decision = EXCLUDED.passenger_decision,
+        decision_at = NOW()
+      `,
+      [rideExternalId, decision]
+    );
+
+    // 2️⃣ In-memory cache (speed only)
+    socket.routeDeviationConsent[rideExternalId] = decision;
+
+    // 3️⃣ Fetch driver
+    const q = await pool.query(
+      `
+      SELECT driver_id
+      FROM rides
+      WHERE external_id = $1
+        AND passenger_id = $2
+        AND status = 'IN_TRANSIT'
+      LIMIT 1
+      `,
+      [rideExternalId, passengerId]
+    );
+
+    if (!q.rows.length) return;
+    const driverId = q.rows[0].driver_id?.toString();
+
+    // 4️⃣ Notify driver
+    socket.to(`driver:${driverId}`).emit(
+      'route_change_decision_result',
+      {
+        rideExternalId,
+        decision,
+        message:
+          decision === 'AGREE'
+            ? 'Passenger agreed to route change.'
+            : 'Passenger did not agree. Please follow suggested route.',
+      }
+    );
+
+  } catch (e) {
+    console.error('route_change_decision error:', e.message);
+  }
+});
+
+socket.on('sos_triggered', async (payload = {}) => {
+  try {
+    const {
+      rideExternalId,
+      triggeredBy, // PASSENGER | DRIVER
+      userId,
+      lat,
+      lng,
+      reason
+    } = payload;
+
+    if (!rideExternalId || !triggeredBy || !userId) return;
+
+    // 1️⃣ Fetch ride
+    const q = await pool.query(
+      `SELECT passenger_id, driver_id, status
+       FROM rides
+       WHERE external_id = $1
+       LIMIT 1`,
+      [rideExternalId]
+    );
+
+    if (!q.rows.length) return;
+
+    const ride = q.rows[0];
+
+    // 2️⃣ Insert SOS event
+    await pool.query(
+      `INSERT INTO ride_safety_events (
+        ride_external_id,
+        driver_id,
+        passenger_id,
+        event_type,
+        latitude,
+        longitude,
+        triggered_by
+      )
+      VALUES ($1,$2,$3,'SOS_TRIGGERED',$4,$5,$6)`,
+      [
+        rideExternalId,
+        ride.driver_id,
+        ride.passenger_id,
+        lat ?? null,
+        lng ?? null,
+        triggeredBy
+      ]
+    );
+	
+	await pool.query(
+  `
+  INSERT INTO ride_sos_state (ride_external_id, status, triggered_at)
+  VALUES ($1, 'TRIGGERED', NOW())
+  ON CONFLICT (ride_external_id)
+  DO NOTHING
+  `,
+  [rideExternalId]
+);
+
+	// ===============================
+// 🧨 AUTO ESCALATION TIMER (30s)
+// ===============================
+if (sosTimers[rideExternalId]) {
+  clearTimeout(sosTimers[rideExternalId]);
+    delete sosTimers[rideExternalId];
+
+}
+
+sosTimers[rideExternalId] = setTimeout(async () => {
+  try {
+    const check = await pool.query(
+      `SELECT status FROM ride_sos_state WHERE ride_external_id = $1`,
+      [rideExternalId]
+    );
+
+    if (check.rows[0]?.status === 'RESOLVED') return;
+
+    await pool.query(
+      `
+      INSERT INTO ride_sos_state (ride_external_id, status, escalated_at)
+      VALUES ($1, 'ESCALATED', NOW())
+      ON CONFLICT (ride_external_id)
+      DO UPDATE SET
+        status = 'ESCALATED',
+        escalated_at = NOW()
+      `,
+      [rideExternalId]
+    );
+
+    io.to('admin_room').emit('sos_escalated', {
+      rideExternalId,
+      message: '🚨 SOS AUTO-ESCALATED (NO RESPONSE)',
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (e) {
+    console.error('SOS escalation failed:', e.message);
+  } finally {
+    delete sosTimers[rideExternalId]; // ✅ ADD THIS
+  }
+}, 30_000);
+
+
+	
+
+    // 3️⃣ Mark ride as under safety monitoring
+   await pool.query(
+  `UPDATE rides SET is_sos_active = TRUE WHERE external_id = $1`,
+  [rideExternalId]
+);
+
+
+    // 4️⃣ Notify admin
+    io.to('admin_room').emit('sos_alert', {
+      rideExternalId,
+      triggeredBy,
+      userId,
+      reason: reason || 'SOS triggered',
+      timestamp: new Date().toISOString()
+    });
+
+    // 5️⃣ Notify both parties
+    io.to(`driver:${ride.driver_id}`).emit('sos_ack', {
+      message: 'SOS received. Support team is monitoring this ride.'
+    });
+
+    io.to(`passenger:${ride.passenger_id}`).emit('sos_ack', {
+      message: 'SOS received. Support team is monitoring this ride.'
+    });
+
+    console.log(`🚨 SOS triggered for ${rideExternalId}`);
+
+  } catch (e) {
+    console.error('sos_triggered error:', e.message);
+  }
+});
+
+
+socket.on('sos_resolved', async ({ rideExternalId, adminId }) => {
+  try {
+    if (!rideExternalId) return;
+
+    await pool.query(
+      `
+      UPDATE ride_sos_state
+      SET status = 'RESOLVED', resolved_at = NOW()
+      WHERE ride_external_id = $1
+      `,
+      [rideExternalId]
+    );
+
+    await pool.query(
+      `UPDATE rides SET is_sos_active = FALSE WHERE external_id = $1`,
+      [rideExternalId]
+    );
+
+    if (sosTimers[rideExternalId]) {
+      clearTimeout(sosTimers[rideExternalId]);
+      delete sosTimers[rideExternalId];
+    }
+
+    io.to('admin_room').emit('sos_resolved_ack', {
+      rideExternalId,
+      adminId,
+      timestamp: new Date().toISOString()
+    });
+
+    console.log(`✅ SOS resolved for ${rideExternalId}`);
+
+  } catch (e) {
+    console.error('sos_resolved error:', e.message);
+  }
+});
+
+
+
+//close here safety related changes
 
 		/* ---------- disconnect ---------- */
 	socket.on('disconnect', async () => {
@@ -2152,12 +3172,13 @@ socket.emit('scheduledRideArrivedAck', {
     }
   }
 
-  for (const [pid, sid] of Object.entries(activePassengers)) {
-    if (sid === socket.id) {
-      delete activePassengers[pid];
-      break;
-    }
+for (const [pid, p] of Object.entries(activePassengers)) {
+  if (p?.socketId === socket.id) {
+    delete activePassengers[pid];
+    break;
   }
+}
+
 });
 
 
@@ -2192,7 +3213,7 @@ setInterval(async () => {
 }, 30_000);
 
 	//setInterval(() => broadcastAvailableDrivers(io, pool), 10000);
-	setInterval(() => {
+setInterval(async () => {
   const drivers = Object.entries(activeDrivers)
     .filter(([_, d]) => d && Date.now() - d.lastSeen < 60_000)
     .map(([userId, d]) => ({
@@ -2202,14 +3223,27 @@ setInterval(async () => {
       longitude: d.longitude,
     }));
 
-  io.to('passengers').emit('update-nearby-drivers', drivers);
+  for (const [pid, pState] of Object.entries(activePassengers)) {
+    if (!pState?.socketId) continue;
+
+    const q = await pool.query(
+      `SELECT 1 FROM rides
+       WHERE passenger_id = $1
+         AND status IN ('ACCEPTED','IN_TRANSIT')
+       LIMIT 1`,
+      [pid]
+    );
+
+    // ✅ send nearby drivers ONLY if no active ride
+    if (q.rowCount === 0) {
+      io.to(pState.socketId).emit('update-nearby-drivers', drivers);
+    }
+  }
 }, 5000);
+
 
 	  return io;
 	}
 
 	module.exports = initSocketServer;
-
-
-
 
