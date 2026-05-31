@@ -2,7 +2,11 @@
 
 // 1. CommonJS Imports
 const express = require('express');
-const { register, login,verifyEmail } = require('../controllers/authController.js');
+const { 
+  register, login, verifyEmail, 
+  lockFirstRideFree, cancelAbuseFreeRide 
+} = require('../controllers/authController');
+
 
 const router = express.Router();
 
@@ -13,6 +17,9 @@ router.post('/register', register);
 router.post('/login', login);
 
 router.get('/verify/:token', verifyEmail);
+
+router.post('/referral/lock-free-ride', lockFirstRideFree);
+router.post('/referral/cancel-abuse', cancelAbuseFreeRide);
 
 // 2. CommonJS Export
 module.exports = router;

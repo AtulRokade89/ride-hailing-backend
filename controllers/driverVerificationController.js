@@ -12,6 +12,15 @@ const pool = new Pool({
   port: process.env.DB_PORT || 5432,
 });
 
+
+const makePublicPath = (filePath) => {
+  if (!filePath) return null;
+  return filePath
+    .replace(/\\/g, '/')        // windows fix
+    .replace(/^.*\/uploads/, '/uploads');
+};
+
+
 // ===== Multer setup for image uploads =====
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -64,12 +73,13 @@ const submitVerification = async (req, res) => {
     }
 
     // Uploaded file URLs
-  normalizedData.panImageUrl = req.files?.pan_image?.[0]?.path || null;
-  normalizedData.aadharImageUrl = req.files?.aadhar_image?.[0]?.path || null;
-  normalizedData.rcImageUrl = req.files?.rc_image?.[0]?.path || null;
-  normalizedData.passbookImageUrl = req.files?.passbook_image?.[0]?.path || null;
-  normalizedData.driverPhotoUrl = req.files?.driver_photo?.[0]?.path || null;
-  normalizedData.vehiclePhotoUrl = req.files?.vehicle_photo?.[0]?.path || null;
+normalizedData.panImageUrl       = makePublicPath(req.files?.pan_image?.[0]?.path);
+normalizedData.aadharImageUrl    = makePublicPath(req.files?.aadhar_image?.[0]?.path);
+normalizedData.rcImageUrl        = makePublicPath(req.files?.rc_image?.[0]?.path);
+normalizedData.passbookImageUrl  = makePublicPath(req.files?.passbook_image?.[0]?.path);
+normalizedData.driverPhotoUrl    = makePublicPath(req.files?.driver_photo?.[0]?.path);
+normalizedData.vehiclePhotoUrl   = makePublicPath(req.files?.vehicle_photo?.[0]?.path);
+
   
   // Basic validation on normalized data
   if (!normalizedData.userId || !normalizedData.panNumber || !normalizedData.aadharNumber || !normalizedData.vehicleNumber) {

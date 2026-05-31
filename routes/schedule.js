@@ -10,12 +10,25 @@ const initSocketServer = require('../socket');
 // --- FARE LOGIC (This code is perfect) ---
 const SCHEDULED_RIDE_PREMIUM_MULTIPLIER = 1.15;
 function computeScheduledFareINR(vehicleType, distanceKm) {
-  // ... (no changes needed here)
   const vt = String(vehicleType || '').toUpperCase();
-  const base = vt === 'MINI' ? 40 : vt === 'SEDAN' ? 70 : vt === 'SUV' ? 100 : 70;
-  const perKm = vt === 'MINI' ? 10 : vt === 'SEDAN' ? 15 : vt === 'SUV' ? 20 : 15;
+
+  // ✅ Same base rates as tax.js — scheduled premium applied on top
+  const base =
+    vt === 'MINI'    ? 45  :
+    vt === 'SEDAN'   ? 75  :
+    vt === 'SUV'     ? 110 :
+    vt === 'EV_MINI' ? 38  : 45;
+
+  const perKm =
+    vt === 'MINI'    ? 11  :
+    vt === 'SEDAN'   ? 16  :
+    vt === 'SUV'     ? 21  :
+    vt === 'EV_MINI' ? 9   : 11;
+
   const km = Math.max(0, Number(distanceKm) || 0);
-  const normalFare = (base + perKm * km);
+  const normalFare = base + perKm * km;
+
+  // +15% scheduled premium
   return Math.round(normalFare * SCHEDULED_RIDE_PREMIUM_MULTIPLIER * 100) / 100;
 }
 
@@ -24,7 +37,7 @@ const GST_RATE = 0.05;
 router.get('/quote', (req, res) => {
     // ... (no changes needed here)
     const { vehicleType, distanceKm } = req.query;
-    if (!['MINI', 'SEDAN', 'SUV'].includes(String(vehicleType).toUpperCase())) {
+    if (!['MINI', 'SEDAN', 'SUV','EV_MINI'].includes(String(vehicleType).toUpperCase())) {
         return res.status(400).json({ error: 'invalid_vehicle_type_for_scheduling' });
     }
     const distance = parseFloat(distanceKm);
@@ -179,6 +192,14 @@ router.get('/passenger/:passengerId', async (req, res) => {
           sr.vehicle_type,
           sr.scheduled_pickup_time,
           sr.estimated_fare,
+		COALESCE(r.waiting_amount, ri.waiting_amount, 0) AS waiting_amount,
+COALESCE(r.extra_amount, ri.extra_amount, 0) AS extra_amount,
+COALESCE((
+  SELECT SUM(tc.toll_amount)
+  FROM toll_charges tc
+  WHERE (tc.scheduled_ride_id = sr.external_id OR tc.ride_id = sr.external_id)
+    AND tc.passenger_status = 'APPROVED'
+), ri.toll_amount, 0) AS toll_amount,
           sr.status,
           sr.driver_id,
 
@@ -197,10 +218,12 @@ router.get('/passenger/:passengerId', async (req, res) => {
           json_build_object('latitude', ST_Y(sr.dropoff_location::geometry), 'longitude', ST_X(sr.dropoff_location::geometry)) AS dropoff_location,
           json_build_object('latitude', ST_Y(d.current_location::geometry), 'longitude', ST_X(d.current_location::geometry)) AS driver_location
 
-       FROM scheduled_rides sr
-       LEFT JOIN drivers d ON sr.driver_id = d.user_id
-       LEFT JOIN users u ON sr.driver_id = u.id
-	   LEFT JOIN driver_verifications dv ON sr.driver_id = dv.user_id
+  FROM scheduled_rides sr
+LEFT JOIN rides r ON r.external_id = sr.external_id
+LEFT JOIN ride_invoices ri ON ri.ride_external_id = sr.external_id
+LEFT JOIN drivers d ON sr.driver_id = d.user_id
+LEFT JOIN users u ON sr.driver_id = u.id
+LEFT JOIN driver_verifications dv ON sr.driver_id = dv.user_id
        WHERE sr.passenger_id = $1
        ORDER BY sr.scheduled_pickup_time DESC`, // Sort by most recent
       [passengerId]

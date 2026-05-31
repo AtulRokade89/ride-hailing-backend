@@ -132,7 +132,7 @@ router.patch('/cash-match', async (req, res) => {
       [driverId, amountInr, `DEPOSITED ${txnRef}`]
     );
 
-    const driverShare = Math.round(amountInr * 0.65);
+    const driverShare = Math.round(amountInr * 0.97);
     const platformShare = amountInr - driverShare;
 
     await pool.query(

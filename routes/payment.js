@@ -87,8 +87,8 @@
     // const fareInr  = Number(r1.rows[0].fare || 0); // INR, e.g., 190.00
 
     // // 2) Split 65 / 35 in **INR**, then round to nearest rupee
-    // const driverShareRoundedInr   = Math.round(fareInr * 0.65); // e.g., 123.5 => 124
-    // const platformShareRoundedInr = Math.round(fareInr * 0.35); // e.g., 66.5  => 67
+    // const driverShareRoundedInr   = Math.round(fareInr * 0.97); // e.g., 123.5 => 124
+    // const platformShareRoundedInr = Math.round(fareInr * 0.03); // e.g., 66.5  => 67
 
     // await pool.query('BEGIN');
 
@@ -157,6 +157,7 @@ const key_secret = process.env.RZP_KEY_SECRET;
 
 // Razorpay client
 const rzp = new Razorpay({ key_id, key_secret });
+const {logPayment}=require('../services/logService');
 
 // Small helper: half-up int rounding (consistent with your invoices)
 function roundHalfUpToInt(value) {
@@ -304,7 +305,7 @@ router.post('/create-order', async (req, res) => {
     // }
 
     // // 3) Split 65/35 **on base only** (whole INR)
-    // const driverShareRoundedInr = Math.round(baseInr * 0.65);
+    // const driverShareRoundedInr = Math.round(baseInr * 0.97);
     // const platformShareRoundedInr = baseInr - driverShareRoundedInr; // complement prevents rounding drift
 
     // await pool.query('BEGIN');
@@ -383,6 +384,13 @@ router.post('/create-order', async (req, res) => {
       rideId,
       driverId
     } = req.body;
+	
+	console.log('verify debug:',{
+		order:razorpay_order_id,
+		payment:razorpay_payment_id,
+		rideId,
+		driverId
+	});
 
     const pool = global.pool;
     if (!pool) throw new Error('DB pool not initialized');
@@ -406,6 +414,7 @@ router.post('/create-order', async (req, res) => {
       `
     SELECT
   driver_id,
+  passenger_id,
   COALESCE(final_fare, estimated_fare) AS fare,
   status,
   payment_status
@@ -413,7 +422,8 @@ FROM rides
 WHERE external_id = $1
   AND status IN ('ACCEPTED','IN_TRANSIT','COMPLETED')
   AND COALESCE(payment_status,'') != 'PAID_ONLINE'
-  AND (driver_id IS NULL OR driver_id = $2)
+  --AND (driver_id IS NULL OR driver_id = $2)
+  AND (driver_id = $2)
 LIMIT 1
       `,
       [rideId, driverId]
@@ -436,23 +446,37 @@ LIMIT 1
     const fareInr = Number(ride.fare || 0);
 
     /* 3️⃣ Fetch base fare from invoice (if exists) */
-    let baseInr = null;
-    const inv = await pool.query(
-      `SELECT base_amount_paise FROM ride_invoices WHERE ride_external_id=$1 LIMIT 1`,
-      [rideId]
-    );
+    /* 3️⃣ Fetch base fare + waiting from invoice */
+let baseInr   = null;
+let waitingInr = 0;
+const inv = await pool.query(
+  `SELECT base_amount_paise, waiting_amount FROM ride_invoices WHERE ride_external_id=$1 LIMIT 1`,
+  [rideId]
+);
 
-    if (inv.rows.length) {
-      baseInr = Number(inv.rows[0].base_amount_paise);
-    }
+if (inv.rows.length) {
+  baseInr    = Number(inv.rows[0].base_amount_paise || 0);
+  waitingInr = roundHalfUpToInt(Number(inv.rows[0].waiting_amount || 0));
+}
 
-    if (!baseInr || baseInr <= 0) {
-      baseInr = Math.round(fareInr / 1.05);
-    }
+if (waitingInr === 0) {
+  const rideRow = await pool.query(
+    `SELECT waiting_amount FROM rides WHERE external_id = $1 LIMIT 1`,
+    [rideId]
+  );
+  waitingInr = roundHalfUpToInt(Number(rideRow.rows[0]?.waiting_amount || 0));
+  console.log(`⚠️ Invoice waiting was 0, fetched from rides table: ₹${waitingInr}`);
+}
 
-    /* 4️⃣ Split 65/35 */
-    const driverShare = Math.round(baseInr * 0.65);
-    const platformShare = baseInr - driverShare;
+// Fallback: invert GST from total fare if invoice not found
+if (!baseInr || baseInr <= 0) {
+  baseInr = Math.round(fareInr / 1.05);
+}
+
+/* 4️⃣ Split: 97% of base to driver + 100% waiting to driver. Platform gets 3% of base only. */
+const driverBaseShare = Math.round(baseInr * 0.97);
+const platformShare   = baseInr - driverBaseShare; // 3% of base, no waiting
+const driverShare     = driverBaseShare + waitingInr; // ✅ waiting fully added to driver
 
     await pool.query('BEGIN');
 
@@ -461,13 +485,34 @@ LIMIT 1
       `
       UPDATE rides
       SET payment_status='PAID_ONLINE',
-          payment_txn_id=$1
-      WHERE external_id=$2
+          payment_txn_id=$1,razorpay_order_id=$2,payment_mode='ONLINE' 
+      WHERE external_id=$3
       `,
-      [razorpay_payment_id, rideId]
+      [razorpay_payment_id, razorpay_order_id,rideId]
     );
 
+console.log('📒 Logging payment...');
+
+await logPayment(pool, {
+  rideId: rideId,
+  driverId: driverId,
+  passengerId: ride.passenger_id || null, // safe fallback
+  amount: fareInr,
+  paymentMode: 'ONLINE',
+  status: 'SUCCESS',
+  orderId: razorpay_order_id,
+  paymentId: razorpay_payment_id,
+  meta: {
+    source: 'razorpay_verify'
+  }
+});
+
+
+
     /* 6️⃣ Driver wallet credit (idempotent) */
+	
+	
+	
     await pool.query(
       `
       INSERT INTO wallet_ledger
@@ -506,10 +551,12 @@ LIMIT 1
     await pool.query('COMMIT');
 
     return res.json({
-      ok: true,
-      base_inr: baseInr,
-      driver_share_inr: driverShare,
-      platform_share_inr: platformShare
+     ok: true,
+  base_inr: baseInr,
+  waiting_inr: waitingInr,
+  driver_base_share_inr: driverBaseShare,
+  driver_total_share_inr: driverShare,
+  platform_share_inr: platformShare
     });
 
   } catch (e) {

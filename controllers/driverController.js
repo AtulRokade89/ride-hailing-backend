@@ -86,6 +86,29 @@ const unblockAfterPayment = async (req, res) => {
   }
 };
 
+const acceptDriverTerms = async (req, res) => {
+  const driverId = req.user.id; // JWT se
+
+  try {
+    await pool.query(
+      `
+      UPDATE driver_verifications
+      SET 
+        terms_accepted = TRUE,
+        terms_accepted_at = NOW()
+      WHERE user_id = $1
+      `,
+      [driverId]
+    );
+
+    res.json({ success: true });
+  } catch (e) {
+    console.error('acceptDriverTerms error:', e);
+    res.status(500).json({ message: 'Failed to accept terms' });
+  }
+};
+
 module.exports = {
   unblockAfterPayment,
+  acceptDriverTerms,
 };

@@ -8,10 +8,14 @@ const {
   DEVIATION_EVENT_COOLDOWN_SEC
 } = require('../constants/safety.constants');
 
-/**
- * ENTRY POINT
- * Called from socket.js → route_deviation_soft
- */
+
+function bearingDiff(b1, b2) {
+  let diff = Math.abs(b1 - b2);
+  return diff > 180 ? 360 - diff : diff;
+}
+
+
+
 async function handleRouteDeviationSoft(socket, payload) {
   const pool = socket.dbPool;
   const consentMap = socket.routeDeviationConsent;
@@ -28,6 +32,7 @@ async function handleRouteDeviationSoft(socket, payload) {
     lng,
     speedKmph
   } = payload;
+  
 
   // 🛡 Passenger already agreed → ignore all future deviations
   if (consentMap?.[rideExternalId] === 'AGREE') return;
@@ -95,10 +100,10 @@ async function handleRouteDeviationSoft(socket, payload) {
   });
 
   // 6️⃣ Create / update safety state
-  await SafetyRepo.upsertSafetyState(pool, {
-    rideExternalId,
-    deviationCount: 1
-  });
+await SafetyRepo.upsertSafetyState(
+  pool,
+  rideExternalId
+);
 
   // 7️⃣ Notify passenger (soft info)
   socket.to(`passenger:${passengerId}`).emit(

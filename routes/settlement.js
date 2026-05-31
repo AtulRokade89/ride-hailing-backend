@@ -43,10 +43,10 @@ router.get('/pending/:driverId', async (req, res) => {
       unsettled_rides: rows,
       total_due_rupees: totalDueInRupees,
       company_account_details: {
-        bankName: 'Global Commercial Bank',
-        accountNumber: '123456789012',
-        ifscCode: 'GCBL0001234',
-        beneficiaryName: 'LetsRide Technologies Pvt Ltd'
+        bankName: 'STATE BANK OF INDIA',
+        accountNumber: '44995335142',
+        ifscCode: 'SBIN0016388',
+        beneficiaryName: 'MoreFLY Technologies'
       }
     });
   } catch (e) {

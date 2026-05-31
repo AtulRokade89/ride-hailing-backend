@@ -57,7 +57,7 @@ async function getSafetyState(pool, rideExternalId) {
   return rows[0] || null;
 }
 
-async function upsertSafetyState(pool, { rideExternalId, deviationCount }) {
+async function upsertSafetyState(pool, rideExternalId) {
   return pool.query(
     `
     INSERT INTO ride_safety_state (
@@ -71,16 +71,41 @@ async function upsertSafetyState(pool, { rideExternalId, deviationCount }) {
       SET deviation_count = ride_safety_state.deviation_count + 1,
           last_event_at = NOW()
     `,
+    [rideExternalId, 1]
+  );
+}
+
+async function updateDeviationState(pool, rideExternalId, deviationCount) {
+  return pool.query(
+    `
+    UPDATE ride_safety_state
+    SET deviation_count = $2,
+        last_event_at = NOW()
+    WHERE ride_external_id = $1
+    `,
     [rideExternalId, deviationCount]
   );
 }
 
+async function markHardDeviation(pool, rideExternalId) {
+  return pool.query(
+    `
+    UPDATE ride_safety_state
+    SET deviation_count = GREATEST(COALESCE(deviation_count, 0), 3),
+        last_event_at = NOW()
+    WHERE ride_external_id = $1
+    `,
+    [rideExternalId]
+  );
+}
 
 
 module.exports = {
   insertRouteDeviation,
   getLastDeviationEvent,
   getSafetyState,
-  upsertSafetyState,  
+  upsertSafetyState,
+updateDeviationState,
+markHardDeviation,  
 };
 
