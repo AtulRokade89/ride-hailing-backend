@@ -274,140 +274,138 @@ startStaleScheduledRideAutoCancel(pool);
 
 	  
 	  // 🧪 TESTING VERSION (Seconds based)
-function startWaitingChargeTimer(rideId, passengerId, driverId) {
-    if (!rideId || waitingTimers[rideId]) return;
-
-    let elapsedSeconds = 0;
-    const rIdStr = String(rideId);
-    const tableName = rIdStr.startsWith('sched_') ? 'scheduled_rides' : 'rides';
-    
-    // Testing Limits
-    const FREE_LIMIT = 30; // 30 seconds free time
-    const CHARGE_PER_SECOND = 1; // ₹1 per second for testing
-
-    waitingTimers[rideId] = setInterval(async () => {
-        elapsedSeconds++;
-        try {
-            // 🛑 SAFETY: Check status
-            const statusCheck = await pool.query(`SELECT status FROM ${tableName} WHERE external_id = $1`, [rIdStr]);
-            
-            if (statusCheck.rows.length === 0 || !['ACCEPTED', 'ARRIVED'].includes(statusCheck.rows[0].status)) {
-                console.log(`⏱️ Timer self-stopped for ${rIdStr}`);
-                clearInterval(waitingTimers[rideId]);
-                delete waitingTimers[rideId];
-                return;
-            }
-
-            const pSockId = activePassengers[passengerId]?.socketId;
-            const dSockId = activeDrivers[driverId]?.socketId;
-
-            if (elapsedSeconds > FREE_LIMIT) { 
-                // Charges start after 30 seconds
-                const totalWaitingCharge = (elapsedSeconds - FREE_LIMIT) * CHARGE_PER_SECOND;
-
-               await pool.query(
-  `UPDATE ${tableName} 
-   SET waiting_amount = COALESCE(waiting_amount, 0) + $1 
-   WHERE external_id = $2`,
-  [CHARGE_PER_SECOND, rIdStr]
-);
-
-                const updateData = { 
-                    rideId: rIdStr, 
-                    minutes: elapsedSeconds - FREE_LIMIT, 
-                    charge: totalWaitingCharge,
-                    rate: 10 // ₹10/min equivalent
-                };
-
-                // Pehli baar jab charge shuru ho (at 31st second)
-                if (elapsedSeconds === FREE_LIMIT + 1) {
-                   io.to(`passenger:${passengerId}`).emit('waitingStarted', updateData);
-                    io.to(`driver:${driverId}`).emit('waitingStarted', updateData);
-                } else {
-                 io.to(`passenger:${passengerId}`).emit('waitingUpdate', updateData);
-				io.to(`driver:${driverId}`).emit('waitingUpdate', updateData);
-                }
-            } else {
-                // Countdown Tick (30 down to 0)
-                const remaining = FREE_LIMIT - elapsedSeconds;
-                const tickData = { rideId: rIdStr, remainingSeconds: remaining };
-                
-                io.to(`passenger:${passengerId}`).emit('waitingTick', tickData);
-               io.to(`driver:${driverId}`).emit('waitingTick', tickData);
-            }
-        } catch (err) {
-            console.error("Error in testing timer:", err);
-        }
-    }, 1000); // 🚀 1 SECOND INTERVAL FOR TESTING
-}
-	  
-	  //prod version
-	  // function startWaitingChargeTimer(rideId, passengerId, driverId) {
+// function startWaitingChargeTimer(rideId, passengerId, driverId) {
     // if (!rideId || waitingTimers[rideId]) return;
 
-    // let elapsedMinutes = 0;
+    // let elapsedSeconds = 0;
     // const rIdStr = String(rideId);
     // const tableName = rIdStr.startsWith('sched_') ? 'scheduled_rides' : 'rides';
+    
+    // // Testing Limits
+    // const FREE_LIMIT = 30; // 30 seconds free time
+    // const CHARGE_PER_SECOND = 1; // ₹1 per second for testing
 
     // waitingTimers[rideId] = setInterval(async () => {
-        // elapsedMinutes++;
+        // elapsedSeconds++;
         // try {
-            // // 🛑 SAFETY: Check if ride is still in WAITING state
+            // // 🛑 SAFETY: Check status
             // const statusCheck = await pool.query(`SELECT status FROM ${tableName} WHERE external_id = $1`, [rIdStr]);
             
-            // // Agar ride status badal gaya hai (IN_TRANSIT/CANCELLED) toh timer band karo
             // if (statusCheck.rows.length === 0 || !['ACCEPTED', 'ARRIVED'].includes(statusCheck.rows[0].status)) {
+                // console.log(`⏱️ Timer self-stopped for ${rIdStr}`);
                 // clearInterval(waitingTimers[rideId]);
                 // delete waitingTimers[rideId];
                 // return;
             // }
 
-            // if (elapsedMinutes > 8) { // 8 minutes free period over
-                // const chargePerMin = 10;
-                // const totalWaitingCharge = (elapsedMinutes - 8) * chargePerMin;
+            // const pSockId = activePassengers[passengerId]?.socketId;
+            // const dSockId = activeDrivers[driverId]?.socketId;
 
-                // await pool.query(
-                    // `UPDATE ${tableName} SET waiting_amount = $1 WHERE external_id = $2`,
-                    // [totalWaitingCharge, rIdStr]
-                // );
+            // if (elapsedSeconds > FREE_LIMIT) { 
+                // // Charges start after 30 seconds
+                // const totalWaitingCharge = (elapsedSeconds - FREE_LIMIT) * CHARGE_PER_SECOND;
 
-                // const pSockId = activePassengers[passengerId]?.socketId;
-                // const dSockId = activeDrivers[driverId]?.socketId;
+               // await pool.query(
+  // `UPDATE ${tableName} 
+   // SET waiting_amount = COALESCE(waiting_amount, 0) + $1 
+   // WHERE external_id = $2`,
+  // [CHARGE_PER_SECOND, rIdStr]
+// );
 
                 // const updateData = { 
                     // rideId: rIdStr, 
-                    // minutes: elapsedMinutes - 8, 
+                    // minutes: elapsedSeconds - FREE_LIMIT, 
                     // charge: totalWaitingCharge,
-                    // rate: chargePerMin 
+                    // rate: 10 // ₹10/min equivalent
                 // };
 
-                // if (elapsedMinutes === 9) {
-                    // if (pSockId) io.to(pSockId).emit('waitingStarted', updateData);
-                    // if (dSockId) io.to(dSockId).emit('waitingStarted', updateData);
+                // // Pehli baar jab charge shuru ho (at 31st second)
+                // if (elapsedSeconds === FREE_LIMIT + 1) {
+                   // io.to(`passenger:${passengerId}`).emit('waitingStarted', updateData);
+                    // io.to(`driver:${driverId}`).emit('waitingStarted', updateData);
                 // } else {
-                    // if (pSockId) io.to(pSockId).emit('waitingUpdate', updateData);
-                    // if (dSockId) io.to(dSockId).emit('waitingUpdate', updateData);
+                 // io.to(`passenger:${passengerId}`).emit('waitingUpdate', updateData);
+				// io.to(`driver:${driverId}`).emit('waitingUpdate', updateData);
                 // }
             // } else {
-                // // Countdown Tick (1 to 8 min)
-                // const pSockId = activePassengers[passengerId]?.socketId;
-                // const dSockId = activeDrivers[driverId]?.socketId;
-                // const tickData = { rideId: rIdStr, remainingSeconds: (8 * 60) - (elapsedMinutes * 60) };
+                // // Countdown Tick (30 down to 0)
+                // const remaining = FREE_LIMIT - elapsedSeconds;
+                // const tickData = { rideId: rIdStr, remainingSeconds: remaining };
                 
-                // if (pSockId) io.to(pSockId).emit('waitingTick', tickData);
-                // if (dSockId) io.to(dSockId).emit('waitingTick', tickData);
+                // io.to(`passenger:${passengerId}`).emit('waitingTick', tickData);
+               // io.to(`driver:${driverId}`).emit('waitingTick', tickData);
             // }
         // } catch (err) {
-            // console.error("Error in waiting timer:", err);
+            // console.error("Error in testing timer:", err);
         // }
-    // }, 60000); // 1 minute interval
+    // }, 1000); // 🚀 1 SECOND INTERVAL FOR TESTING
 // }
+	  
+	  //prod version
+	  function startWaitingChargeTimer(rideId, passengerId, driverId) {
+    if (!rideId || waitingTimers[rideId]) return;
+
+    let elapsedMinutes = 0;
+    const rIdStr = String(rideId);
+    const tableName = rIdStr.startsWith('sched_') ? 'scheduled_rides' : 'rides';
+
+    waitingTimers[rideId] = setInterval(async () => {
+        elapsedMinutes++;
+        try {
+            // 🛑 SAFETY: Check if ride is still in WAITING state
+            const statusCheck = await pool.query(`SELECT status FROM ${tableName} WHERE external_id = $1`, [rIdStr]);
+            
+            // Agar ride status badal gaya hai (IN_TRANSIT/CANCELLED) toh timer band karo
+            if (statusCheck.rows.length === 0 || !['ACCEPTED', 'ARRIVED'].includes(statusCheck.rows[0].status)) {
+                clearInterval(waitingTimers[rideId]);
+                delete waitingTimers[rideId];
+                return;
+            }
+
+            if (elapsedMinutes > 8) { // 8 minutes free period over
+                const chargePerMin = 10;
+                const totalWaitingCharge = (elapsedMinutes - 8) * chargePerMin;
+
+                   await pool.query(
+        `UPDATE ${tableName}
+         SET waiting_amount = COALESCE(waiting_amount, 0) + $1
+         WHERE external_id = $2`,
+        [chargePerMin, rIdStr]
+    );
+
+                const pSockId = activePassengers[passengerId]?.socketId;
+                const dSockId = activeDrivers[driverId]?.socketId;
+
+                const updateData = { 
+                    rideId: rIdStr, 
+                    minutes: elapsedMinutes - 8, 
+                    charge: totalWaitingCharge,
+                    rate: chargePerMin 
+                };
+
+                if (elapsedMinutes === 9) {
+                    if (pSockId) io.to(pSockId).emit('waitingStarted', updateData);
+                    if (dSockId) io.to(dSockId).emit('waitingStarted', updateData);
+                } else {
+                    if (pSockId) io.to(pSockId).emit('waitingUpdate', updateData);
+                    if (dSockId) io.to(dSockId).emit('waitingUpdate', updateData);
+                }
+            } else {
+                // Countdown Tick (1 to 8 min)
+                const pSockId = activePassengers[passengerId]?.socketId;
+                const dSockId = activeDrivers[driverId]?.socketId;
+                const tickData = { rideId: rIdStr, remainingSeconds: (8 * 60) - (elapsedMinutes * 60) };
+                
+                if (pSockId) io.to(pSockId).emit('waitingTick', tickData);
+                if (dSockId) io.to(dSockId).emit('waitingTick', tickData);
+            }
+        } catch (err) {
+            console.error("Error in waiting timer:", err);
+        }
+    }, 60000); // 1 minute interval
+}
 //prod version 
 
-	  //
-	  // Helper: find candidate drivers around the passenger, within radius,
-	  // excluding driver IDs in excludeSet. Uses activeDrivers in-memory and supplements
-	  // prioritization using acceptance rate (accepted/(accepted+rejected+1)).
 	  async function findCandidateDrivers(passengerLat, passengerLng, vehicleType, excludeSet = new Set(), radiusKm = 3.0) {
 		const simpleCandidates = [];
 		for (const [driverId, d] of Object.entries(activeDrivers)) {
@@ -464,11 +462,6 @@ function startWaitingChargeTimer(rideId, passengerId, driverId) {
 
 		return enhanced;
 	  }
-
-	  //
-	  // Rematch rounds: tries sequential rounds (non-blocking to caller)
-	  // rounds = [{ radiusKm, waitMs }, ...]
-	  //
 	  async function startRematchRounds(rideId, passengerSocketId, vehicleType, passengerLat, passengerLng, initialExclude = []) {
 		try {
 		  const excludeSet = new Set((initialExclude || []).map(String));
@@ -592,14 +585,6 @@ if (cur.isOnActiveRide === true) {
 			  } catch (e) { console.warn('vehicle_type fetch failed:', e.message); }
 
 			  if (!vehicleType && payload.vehicleType) vehicleType = String(payload.vehicleType).toUpperCase();
-
-			  // activeDrivers[userId] = {
-				// socketId: socket.id,
-				// latitude:  (typeof prev.latitude  === 'number') ? prev.latitude  : null,
-				// longitude: (typeof prev.longitude === 'number') ? prev.longitude : null,
-				// vehicleType,
-				// lastSeen: Date.now(),
-			  // };
 			  
 activeDrivers[userId] = {
   ...(activeDrivers[userId] || {}), // 🧠 preserve existing state
@@ -705,8 +690,6 @@ socket.on('appVisibility', ({ passengerId, role, visible }) => {
     `👁 Passenger ${passengerId} visibility = ${visible}`
   );
 });
-
-
 
 		/* ---------- driver online toggle ---------- */
 		socket.on('driverOnlineToggle', async (payload = {}) => {
@@ -838,47 +821,6 @@ socket.on('driver-go-offline', async (data) => {
 });
 
 		/* ---------- driver location updates ---------- */
-		// socket.on('driverLocationUpdate', async (payload = {}) => {
-		  // try {
-			// const userId = payload.userId?.toString();
-			// if (!userId) return;
-
-			// const latitude = Number(payload.latitude);
-			// const longitude = Number(payload.longitude);
-			// if (Number.isNaN(latitude) || Number.isNaN(longitude)) {
-			  // console.warn(`Invalid location for driver ${userId}:`, payload.latitude, payload.longitude);
-			  // return;
-			// }
-			// const vt = payload.vehicleType ? String(payload.vehicleType).toUpperCase() : null;
-
-			// if (!activeDrivers[userId]) {
-			  // activeDrivers[userId] = {
-				// socketId: socket.id, latitude, longitude, vehicleType: vt || undefined, lastSeen: Date.now(),
-			  // };
-			// } else {
-			  // Object.assign(activeDrivers[userId], { latitude, longitude, lastSeen: Date.now() });
-			  // if (vt) activeDrivers[userId].vehicleType = vt;
-			// }
-
-			// if (vt) {
-			  // const room = `drivers:${vt}`;
-			  // if (!socket.rooms.has(room)) { socket.join(room); console.log(`🚕 Driver ${userId} joined ${room} via location update`); }
-			// }
-
-			// try {
-			  // await pool.query(
-				// `UPDATE drivers
-				   // SET current_location = ST_SetSRID(ST_MakePoint($2, $1), 4326)::geography,
-					   // last_seen = NOW(), is_online = TRUE
-				 // WHERE user_id = $3`,
-				// [latitude, longitude, userId]
-			  // );
-			// } catch (e) { console.warn(`persist location failed for ${userId}:`, e.message); }
-
-			// socket.broadcast.emit('driverLocation', { userId, latitude, longitude });
-		  // } catch (e) { console.warn('driverLocationUpdate error:', e); }
-		// });
-		
 		
 		socket.on('driverLocationUpdate', async (payload = {}) => {
   try {
@@ -3692,19 +3634,12 @@ socket.on('driver-request-ride-resend', async ({ driverId, rideId }) => {
       fromResync: true,
     });
 
-// const dSid = activeDrivers[String(driverId)]?.socketId;
-// if (dSid) {
-  // io.to(dSid).emit('newRideRequest', payload);
-// }
-
     console.log(`🔁 Resent ride ${rideId} to driver ${driverId}`);
   } catch (e) {
     console.error('driver-request-ride-resend error:', e);
   }
 });
 
-
-//passenger and driver safety module start 
 
 async function logRouteSnapshot(pool, data) {
   const {

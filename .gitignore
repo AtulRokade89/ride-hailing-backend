@@ -16,3 +16,7 @@ npm-debug.log*
 .idea/
 .vscode/
 .DS_Store
+
+
+ride_*.sql
+riude_*.sql
