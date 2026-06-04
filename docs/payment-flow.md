@@ -1,21 +1,23 @@
 # Payment Flow
 
-Online payment flow:
+This document explains how payment and final fare should work in production.
+
+## Online Payment Flow
 
 ```text
-Create Razorpay Order
+Create Razorpay order
     |
     v
 Passenger completes payment
     |
     v
-Payment success received
+Backend receives payment details
     |
     v
-Verify payment signature
+Verify Razorpay signature
     |
     v
-Update ride payment status
+Update ride/payment status
     |
     v
 Complete ride
@@ -24,7 +26,7 @@ Complete ride
 Calculate final fare
     |
     v
-Create invoice
+Create or update invoice
     |
     v
 Create wallet ledger entry
@@ -33,15 +35,7 @@ Create wallet ledger entry
 Create payment log
 ```
 
-Final fare inputs:
-
-- Base ride fare.
-- Waiting charge.
-- Extra distance charge.
-- Toll charge.
-- Pending penalty or collected amount, where applicable.
-
-Cash payment flow:
+## Cash Payment Flow
 
 ```text
 Driver marks cash collected
@@ -50,30 +44,61 @@ Driver marks cash collected
 Backend completes ride
     |
     v
-Final fare saved
+Calculate final fare
     |
     v
-Driver wallet/platform dues updated
+Save final fare
     |
     v
-Invoice and payment log created
+Create invoice
+    |
+    v
+Create wallet/platform due entry
+    |
+    v
+Create payment log
 ```
 
+## Final Fare Formula
 
-Failure Scenarios
+Final fare should include:
 
-Razorpay Success
-↓
-Verification Failed
+- Base ride fare.
+- Waiting charge.
+- Extra distance charge.
+- Toll charge.
+- Pending penalty or collected amount, where applicable.
 
-Duplicate Callback
+Expected example:
 
-Payment Success
-But Ride Not Completed
+```text
+Base fare:        200
+Waiting charge:   20
+Extra charge:      0
+Toll charge:       0
+Final fare:      220
+```
 
-Important production checks:
+## Wallet Behavior
+
+- Online ride: driver wallet should receive the driver earning credit.
+- Cash ride: platform due/commission entry should be created where applicable.
+- Waiting, toll, and extra charges should be included in the correct driver/platform calculation.
+- Duplicate callbacks should not create duplicate wallet credits.
+
+## Production Checks
 
 - Razorpay signature must be verified before marking online payment successful.
-- `final_fare` should include waiting, extra distance, and toll charges.
-- Wallet ledger should have correct driver credit or platform due.
-- Duplicate payment callbacks should not create duplicate wallet entries.
+- `final_fare` must match invoice total.
+- Invoice should include waiting, extra distance, and toll values separately.
+- Wallet ledger should match final fare and payment mode rules.
+- Payment logs should be written after successful completion.
+- Failed payment should not complete the ride as paid.
+
+## Common Issues To Watch
+
+- Payment success in Razorpay but backend did not update ride.
+- Duplicate payment callback creates duplicate wallet entries.
+- Cash ride completed but driver/platform dues are missing.
+- Final fare shown in app does not match invoice.
+- Waiting amount exists in DB but is not included in final fare.
