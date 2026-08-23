@@ -1,4 +1,4 @@
-// server.js (Corrected)
+// server.js
 require('dotenv').config();
 
 const express = require('express');
@@ -29,6 +29,11 @@ const adminSupportRoutes = require('./routes/admin.support.routes');
 const adminNotificationRoutes = require('./routes/admin.notification.routes');
 const disputeRoutes = require('./routes/dispute.js');
 const tollRouter = require('./routes/toll');
+const {
+  apiLoggerMiddleware,
+  wrapPoolWithLogger,
+  healthHandler,
+} = require('./services/logger');
 
 
 if (
@@ -46,13 +51,13 @@ console.log(
 );
 
 // --- DB Pool ---
-const pool = new Pool({
+const pool = wrapPoolWithLogger(new Pool({
   user:     process.env.DB_USER,
   host:     process.env.DB_HOST,
   database: process.env.DB_NAME,
   password: process.env.DB_PASSWORD,
   port:     process.env.DB_PORT,
-});
+}));
 
 // Expose for routes that need them at runtime (MOVED THIS BLOCK UP)
 global.pool = pool; // <--- Set global.pool BEFORE mounting routes
@@ -88,7 +93,29 @@ require('./scheduledNotification.job');
 
 // Simple check
 app.get('/', (_req, res) => res.send('Ride Hailing Backend is running!'));
-app.use((req, _res, next) => { console.log(req.method, req.url); next(); });
+//app.use((req, _res, next) => { console.log(req.method, req.url); next(); });
+
+// app.use((req, res, next) => {
+  // const start = Date.now();
+
+  // res.on('finish', () => {
+    // const duration = Date.now() - start;
+
+    // console.log(
+      // `[API] ${req.method} ${req.originalUrl} | ${res.statusCode} | ${duration}ms`
+    // );
+
+    // if (duration > 1000) {
+      // console.warn(
+        // `[SLOW API] ${req.method} ${req.originalUrl} took ${duration}ms`
+      // );
+    // }
+  // });
+
+  // next();
+// });
+
+app.use(apiLoggerMiddleware);
 
 // Mount routes
 app.use('/api/auth', authRoutes);
@@ -117,6 +144,7 @@ app.use('/api/admin/driver-settlements', require('./Routes/driverSettlement.rout
 app.use('/api/quote', require('./routes/quote'));
 app.use('/api/dispute', disputeRoutes);
 app.use('/api/toll', tollRouter);
+app.use('/api/admin/monitoring', require('./routes/monitoring'));
 
 // CORRECT:
 //require('./cron_jobs');
@@ -129,6 +157,25 @@ const { isGstApplicable, roundedRupeesFromPaise } = require('./utils/tax'); // T
   // const km = Math.max(0, Number(distanceKm) || 0);
   // return Math.round((base + perKm * km) * 100) / 100;
 // }
+
+
+// TEMP DEBUG — server.js mein add karo
+app.get('/debug-fcm', async (req, res) => {
+  const pool = global.pool;
+  try {
+    const tables = await pool.query(`
+      SELECT table_name FROM information_schema.tables 
+      WHERE table_schema = 'public' AND table_name ILIKE '%fcm%'
+    `);
+    const cols = await pool.query(`
+      SELECT column_name FROM information_schema.columns 
+      WHERE table_name = 'fcm_tokens'
+    `);
+    res.json({ tables: tables.rows, columns: cols.rows });
+  } catch(e) {
+    res.json({ error: e.message });
+  }
+});
 
 app.get('/api/quote', async (req, res) => {
   try {
@@ -762,16 +809,19 @@ const isOnline = ride.payment_mode === 'ONLINE' || ledger.creditOnline > 0;
   }
 });
 
-app.get("/health", (req, res) => {
-  res.status(200).send("OK");
-});
+// app.get("/health", (req, res) => {
+  // res.status(200).send("OK");
+// });
 
-app.get('/api/health', (req, res) => {
-  res.status(200).json({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-  });
-});
+// app.get('/api/health', (req, res) => {
+  // res.status(200).json({
+    // status: 'ok',
+    // timestamp: new Date().toISOString(),
+  // });
+// });
+
+app.get('/health',     healthHandler);
+app.get('/api/health', healthHandler);
 
 async function reconcileStateOnStartup() {
   console.log('🔄 Reconciling system state after restart');

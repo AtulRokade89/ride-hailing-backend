@@ -166,6 +166,7 @@
 
 // cron_jobs.js
 const cron = require('node-cron');
+const { cronLogger } = require('./services/logger');
 const { findDriverForRide } = require('./utils/dispatcher');
 const startScheduledNotificationJob = require('./scheduledNotification.job');
 const initSocketServer = require('./socket');
@@ -181,6 +182,10 @@ function initializeCronJobs(pool, io) {
   // ─────────────────────────────────────────────────────────────────────────
   cron.schedule('*/5 * * * *', async () => {
     console.log(`[CRON-HEADSUP] Checking for rides needing an early warning...`);
+	  const jobName = 'STALE_RIDE_CLEANUP';
+    const t0      = Date.now();
+    cronLogger.started(jobName);
+	
     if (!pool || !io) {
       console.error('[CRON-HEADSUP] Cron job failed: Pool or IO not initialized.');
       return;
@@ -217,8 +222,11 @@ function initializeCronJobs(pool, io) {
           }
         }
       }
+	  cronLogger.finished(jobName, Date.now() - t0);
     } catch (e) {
       console.error('[CRON-HEADSUP] Error during heads-up cycle:', e);
+	    cronLogger.error(jobName, e);
+      console.error(`[CRON] ${jobName} failed:`, e);
     } finally {
       client.release();
     }
@@ -230,10 +238,14 @@ function initializeCronJobs(pool, io) {
   // ─────────────────────────────────────────────────────────────────────────
   cron.schedule('*/1 * * * *', async () => {
     console.log(`[CRON-DISPATCH] Checking for upcoming scheduled rides...`);
+	 const jobName = 'SCHEDULED_RIDE_DISPATCH';
+    const t0      = Date.now();
+ 
     if (!pool || !io) {
       console.error('[CRON-DISPATCH] Cron job failed: Pool or IO not initialized.');
       return;
     }
+	  cronLogger.started(jobName);
     const client = await pool.connect();
     try {
       const queryText = `
@@ -260,8 +272,11 @@ function initializeCronJobs(pool, io) {
       } else {
         console.log(`[CRON-DISPATCH] No rides found in the current dispatch window.`);
       }
+	   cronLogger.finished(jobName, Date.now() - t0);
     } catch (e) {
       console.error('[CRON-DISPATCH] FATAL: Error during dispatch cycle:', e);
+	      cronLogger.error(jobName, e);
+      console.error(`[CRON] ${jobName} failed:`, e);
     } finally {
       client.release();
     }
@@ -273,10 +288,13 @@ function initializeCronJobs(pool, io) {
   // ─────────────────────────────────────────────────────────────────────────
   cron.schedule('0 */3 * * *', async () => {
     console.log('Running job: Send settlement reminders...');
+	    const jobName = 'settelement_reminder';
+    const t0      = Date.now();
     if (!pool || !io) {
       console.error('Cron job failed: Pool or IO not initialized.');
       return;
     }
+	  cronLogger.started(jobName);
 
     try {
       const { rows } = await pool.query(
@@ -297,8 +315,11 @@ function initializeCronJobs(pool, io) {
           }
         }
       }
+	   cronLogger.finished(jobName, Date.now() - t0);
     } catch (e) {
       console.error('Reminder job failed:', e);
+	   cronLogger.error(jobName, e);
+      console.error(`[CRON] ${jobName} failed:`, e);
     }
   });
 
@@ -308,10 +329,14 @@ function initializeCronJobs(pool, io) {
   // ─────────────────────────────────────────────────────────────────────────
   cron.schedule('0 0 * * *', async () => {
     console.log('Running job: Block overdue drivers...');
+	
+	 const jobName = 'block_over_due';
+    const t0      = Date.now();
     if (!pool) {
       console.error('Cron job failed: Pool not initialized.');
       return;
     }
+	  cronLogger.started(jobName);
 
     try {
       const { rows } = await pool.query(
@@ -324,8 +349,11 @@ function initializeCronJobs(pool, io) {
          )`
       );
       console.log(`Blocked ${rows.rowCount} overdue drivers.`);
+	  cronLogger.finished(jobName, Date.now() - t0);
     } catch (e) {
       console.error('Blocking job failed:', e);
+	  cronLogger.error(jobName, e);
+      console.error(`[CRON] ${jobName} failed:`, e);
     }
   });
 
@@ -337,8 +365,12 @@ function initializeCronJobs(pool, io) {
   // OPEN → PENDING_ADMIN_REVIEW
   // ─────────────────────────────────────────────────────────────────────────
   cron.schedule('* * * * *', async () => {
+	  
+	     const jobName = 'pending_admin_review';
+    const t0      = Date.now();
     if (!pool) return;
     const client = await pool.connect();
+	 cronLogger.started(jobName);
     try {
       // Fetch all OPEN disputes jinka auto_resolve_at time nikal gaya
       const { rows: expiredDisputes } = await client.query(
@@ -409,8 +441,11 @@ function initializeCronJobs(pool, io) {
           );
         }
       }
+	   cronLogger.finished(jobName, Date.now() - t0);
     } catch (e) {
       console.error('[CRON-DISPUTE-15MIN] Error:', e);
+	     cronLogger.error(jobName, e);
+      console.error(`[CRON] ${jobName} failed:`, e);
     } finally {
       client.release();
     }
@@ -427,8 +462,13 @@ function initializeCronJobs(pool, io) {
   //   → TIMEOUT_RESOLVED
   // ─────────────────────────────────────────────────────────────────────────
   cron.schedule('0 * * * *', async () => {
+	    const jobName = 'time_out_resolve_issue_partial_fair';
+    const t0      = Date.now();
+	  
     if (!pool) return;
+	
     const client = await pool.connect();
+	  cronLogger.started(jobName);
     try {
       const { rows: timedOutDisputes } = await client.query(
         `SELECT id, ride_external_id, ride_type, partial_fare
@@ -576,8 +616,11 @@ console.log(`[CRON-DISPUTE-48HR] Dispute #${dispute.id} → TIMEOUT_RESOLVED. Dr
           console.error(`[CRON-DISPUTE-48HR] Failed for dispute #${dispute.id}:`, innerErr.message);
         }
       }
+	   cronLogger.finished(jobName, Date.now() - t0);
     } catch (e) {
       console.error('[CRON-DISPUTE-48HR] Error:', e);
+	   cronLogger.error(jobName, e);
+      console.error(`[CRON] ${jobName} failed:`, e);
     } finally {
       client.release();
     }
@@ -639,6 +682,12 @@ async function _disputeNotifyBothFromRide(pool, rideExternalId, rideType, disput
     console.error(`[DISPUTE-NOTIFY] Failed for dispute #${disputeId}:`, e.message);
   }
 }
+
+cron.schedule('*/4 * * * *', async () => {
+  try {
+    await global.pool.query('SELECT 1');
+  } catch (_) {}
+});
 
 
 module.exports = initializeCronJobs;

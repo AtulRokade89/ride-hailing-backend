@@ -162,6 +162,7 @@
 // module.exports = { sendNotificationToUser };
 
 const admin = require('firebase-admin');
+const { fcmLogger } = require('./logger');
 
 function channelFor(type) {
   if (type === 'NEW_RIDE') return 'ride_requests';

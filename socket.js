@@ -10,6 +10,7 @@
 	const SafetyService = require('./services/safety.service');
 	const { getPassengerBadge } = require('./utils/ratingUtils');
 	const { logRide, logPayment } = require('./services/logService');
+	const { socketLogger, fcmLogger, rideLogger } = require('./services/logger');
 
 
 	const activeDrivers = {};     // { [driverId]: { socketId, latitude, longitude, vehicleType, lastSeen } }
@@ -17,6 +18,7 @@
 	const rideNotifiedDrivers = {};
 	const rideBlockedDrivers = {};
 	const waitingTimers = {};  
+	const graceTimers = {}; 
 	const lastRouteSnapshotAt = {};
 	global.routeDeviationConsent = {}; 
 	const sosTimers = {};
@@ -186,12 +188,6 @@ function startStaleScheduledRideAutoCancel(pool) {
   };
 }
 
-	// function roundedRupeesFromPaise(paise) {
-	  // if (typeof paise !== 'number' || !Number.isFinite(paise)) return 0;
-	  // return Math.round(paise / 100);
-	// }
-
-
 
 	//const roundHalfUpToInt = (v)=>{const n=Number(v)||0, f=Math.floor(n);return (n-f)>=0.5?f+1:f};
 	function roundHalfUpToInt(n) {
@@ -342,67 +338,67 @@ startStaleScheduledRideAutoCancel(pool);
 // }
 	  
 	  //prod version
-	  function startWaitingChargeTimer(rideId, passengerId, driverId) {
-    if (!rideId || waitingTimers[rideId]) return;
+	function startWaitingChargeTimer(rideId, passengerId, driverId, startFromMinutes = 0) {
+  if (!rideId) return;
+  if (waitingTimers[rideId]) {
+    clearInterval(waitingTimers[rideId]);
+    delete waitingTimers[rideId];
+  }
 
-    let elapsedMinutes = 0;
-    const rIdStr = String(rideId);
-    const tableName = rIdStr.startsWith('sched_') ? 'scheduled_rides' : 'rides';
+  let elapsedMinutes = startFromMinutes;
+  const rIdStr = String(rideId);
+  const tableName = rIdStr.startsWith('sched_') ? 'scheduled_rides' : 'rides';
+  const FREE_MINUTES = 5;      // testing: 0, production: 5
+  const CHARGE_PER_MIN = 10;
+  const INTERVAL_MS = 60000;   // testing: 10000, production: 60000
 
-    waitingTimers[rideId] = setInterval(async () => {
-        elapsedMinutes++;
-        try {
-            // 🛑 SAFETY: Check if ride is still in WAITING state
-            const statusCheck = await pool.query(`SELECT status FROM ${tableName} WHERE external_id = $1`, [rIdStr]);
-            
-            // Agar ride status badal gaya hai (IN_TRANSIT/CANCELLED) toh timer band karo
-            if (statusCheck.rows.length === 0 || !['ACCEPTED', 'ARRIVED'].includes(statusCheck.rows[0].status)) {
-                clearInterval(waitingTimers[rideId]);
-                delete waitingTimers[rideId];
-                return;
-            }
+  waitingTimers[rideId] = setInterval(async () => {
+    elapsedMinutes++;
+    try {
+      const statusCheck = await pool.query(
+        `SELECT status FROM ${tableName} WHERE external_id = $1`, [rIdStr]
+      );
+      if (statusCheck.rows.length === 0 || !['ACCEPTED', 'ARRIVED'].includes(statusCheck.rows[0].status)) {
+        console.log(`⏹️ Timer auto-stopped for ${rIdStr}`);
+        clearInterval(waitingTimers[rideId]);
+        delete waitingTimers[rideId];
+        return;
+      }
 
-            if (elapsedMinutes > 8) { // 8 minutes free period over
-                const chargePerMin = 10;
-                const totalWaitingCharge = (elapsedMinutes - 8) * chargePerMin;
+      const pSockId = activePassengers[passengerId]?.socketId;
+      const dSockId = activeDrivers[driverId]?.socketId;
 
-                   await pool.query(
-        `UPDATE ${tableName}
-         SET waiting_amount = COALESCE(waiting_amount, 0) + $1
-         WHERE external_id = $2`,
-        [chargePerMin, rIdStr]
-    );
+      if (elapsedMinutes > FREE_MINUTES) {
+        const chargedMinutes = elapsedMinutes - FREE_MINUTES;
+        const totalCharge = chargedMinutes * CHARGE_PER_MIN;
 
-                const pSockId = activePassengers[passengerId]?.socketId;
-                const dSockId = activeDrivers[driverId]?.socketId;
+        await pool.query(
+          `UPDATE ${tableName} SET waiting_amount = COALESCE(waiting_amount, 0) + $1 WHERE external_id = $2`,
+          [CHARGE_PER_MIN, rIdStr]
+        );
+        console.log(`💰 ₹${CHARGE_PER_MIN} added for ${rIdStr} — total ₹${totalCharge}`);
 
-                const updateData = { 
-                    rideId: rIdStr, 
-                    minutes: elapsedMinutes - 8, 
-                    charge: totalWaitingCharge,
-                    rate: chargePerMin 
-                };
+        const updateData = { rideId: rIdStr, minutes: chargedMinutes, charge: totalCharge, rate: CHARGE_PER_MIN };
 
-                if (elapsedMinutes === 9) {
-                    if (pSockId) io.to(pSockId).emit('waitingStarted', updateData);
-                    if (dSockId) io.to(dSockId).emit('waitingStarted', updateData);
-                } else {
-                    if (pSockId) io.to(pSockId).emit('waitingUpdate', updateData);
-                    if (dSockId) io.to(dSockId).emit('waitingUpdate', updateData);
-                }
-            } else {
-                // Countdown Tick (1 to 8 min)
-                const pSockId = activePassengers[passengerId]?.socketId;
-                const dSockId = activeDrivers[driverId]?.socketId;
-                const tickData = { rideId: rIdStr, remainingSeconds: (8 * 60) - (elapsedMinutes * 60) };
-                
-                if (pSockId) io.to(pSockId).emit('waitingTick', tickData);
-                if (dSockId) io.to(dSockId).emit('waitingTick', tickData);
-            }
-        } catch (err) {
-            console.error("Error in waiting timer:", err);
+        if (chargedMinutes === 1) {
+          if (pSockId) io.to(pSockId).emit('waitingStarted', updateData);
+          if (dSockId) io.to(dSockId).emit('waitingStarted', updateData);
+          console.log(`🚨 waitingStarted emitted for ${rIdStr}`);
+        } else {
+          if (pSockId) io.to(pSockId).emit('waitingUpdate', updateData);
+          if (dSockId) io.to(dSockId).emit('waitingUpdate', updateData);
         }
-    }, 60000); // 1 minute interval
+      } else {
+        const remaining = Math.max(0, (FREE_MINUTES * 60) - (elapsedMinutes * 60));
+        const tickData = { rideId: rIdStr, remainingSeconds: remaining };
+        if (pSockId) io.to(pSockId).emit('waitingTick', tickData);
+        if (dSockId) io.to(dSockId).emit('waitingTick', tickData);
+        console.log(`⏱️ tick for ${rIdStr} — remaining: ${remaining}s`);
+      }
+    } catch (err) {
+      console.error('Waiting charge error:', err.message);
+    }
+  }, INTERVAL_MS);
 }
 //prod version 
 
@@ -544,7 +540,13 @@ if (cur.isOnActiveRide === true) {
 			}
 			// otherwise continue to next round
 		  }
-
+		  
+rideLogger.noDriverFound(pool, {
+  rideId: extId,
+  passengerId,
+  vehicleType: requestedVehicleType,
+  searchedCount: notified,
+});
 		  // all rounds exhausted
 		  if (passengerSocketId) io.to(passengerSocketId).emit('rematchFailed', { rideId, message: 'No drivers available right now' });
 		  return;
@@ -610,6 +612,7 @@ try {
   }
 } catch(e) { 
   activeDrivers[userId].isOnActiveRide = false; 
+  
 }
 
 		if (!socket._joinedScheduledRoom) {
@@ -634,12 +637,45 @@ try {
   socketId: socket.id,
   isForeground: true,
 };
+  socketLogger.connected(socket.id, userId, 'passenger');
 			  socket.join('passengers');
 			  socket.join(`passenger:${userId}`);  
 			  console.log(`✅ Passenger ${userId} registered`);
 			}
 		  } catch (e) { console.warn('join error:', e); }
 		});
+
+// socket.on('passengerComing', async ({ rideId }) => {
+  // const rIdStr = String(rideId || '');
+  // if (!rIdStr) return;
+
+  // const tableName = rIdStr.startsWith('sched_') ? 'scheduled_rides' : 'rides';
+
+  // try {
+    // const { rows } = await pool.query(
+      // `SELECT driver_id, passenger_id FROM ${tableName} WHERE external_id=$1 LIMIT 1`,
+      // [rIdStr]
+    // );
+
+    // const ride = rows[0];
+    // stopWaitingChargeTimer(rIdStr);
+
+    // if (ride) {
+      // const pSockId = activePassengers[String(ride.passenger_id)]?.socketId;
+      // const dSockId = activeDrivers[String(ride.driver_id)]?.socketId;
+
+      // const payload = {
+        // rideId: rIdStr,
+        // reason: 'passenger_coming',
+      // };
+
+      // if (pSockId) io.to(pSockId).emit('waitingStopped', payload);
+      // if (dSockId) io.to(dSockId).emit('waitingStopped', payload);
+    // }
+  // } catch (e) {
+    // console.error('passengerComing failed:', e.message);
+  // }
+// });
 
 socket.on('passengerComing', async ({ rideId }) => {
   const rIdStr = String(rideId || '');
@@ -654,21 +690,56 @@ socket.on('passengerComing', async ({ rideId }) => {
     );
 
     const ride = rows[0];
+    if (!ride) return;
+
+    const passengerId = String(ride.passenger_id);
+    const driverId    = String(ride.driver_id);
+
+    // ⏸️ Waiting timer temporarily pause
     stopWaitingChargeTimer(rIdStr);
 
-    if (ride) {
-      const pSockId = activePassengers[String(ride.passenger_id)]?.socketId;
-      const dSockId = activeDrivers[String(ride.driver_id)]?.socketId;
+    // UI update — dono sides ko waitingStopped bhejo
+    const pSockId = activePassengers[passengerId]?.socketId;
+    const dSockId = activeDrivers[driverId]?.socketId;
+if (pSockId) io.to(pSockId).emit('graceStarted', { rideId: rIdStr, graceSeconds: 180 }); // 3 min grace
+if (dSockId) io.to(dSockId).emit('graceStarted', { rideId: rIdStr, graceSeconds: 180 });
 
-      const payload = {
-        rideId: rIdStr,
-        reason: 'passenger_coming',
-      };
+    // 🔔 Driver screen pe "Passenger on the way" dikhao
+    if (dSockId) io.to(dSockId).emit('passengerComingNotified', { rideId: rIdStr });
 
-      if (pSockId) io.to(pSockId).emit('waitingStopped', payload);
-      if (dSockId) io.to(dSockId).emit('waitingStopped', payload);
-    }
+    // ⏳ 3 min grace — agar OTP scan nahi hua to charges restart
+    const GRACE_MS = 3 * 60 * 1000;
+    if (graceTimers[rIdStr]) clearTimeout(graceTimers[rIdStr]); // double-press safe
+
+    graceTimers[rIdStr] = setTimeout(async () => {
+      delete graceTimers[rIdStr];
+      try {
+        const { rows: statusRows } = await pool.query(
+          `SELECT status FROM ${tableName} WHERE external_id=$1 LIMIT 1`,
+          [rIdStr]
+        );
+        const currentStatus = statusRows[0]?.status;
+
+        // Ride abhi bhi ARRIVED hai = passenger nahi aaya, OTP nahi hua
+        if (currentStatus === 'ARRIVED') {
+          console.log(`⏱️ Grace expired for ${rIdStr}, restarting waiting timer`);
+          startWaitingChargeTimer(rIdStr, passengerId, driverId, 5);
+
+          const pSock = activePassengers[passengerId]?.socketId;
+          const dSock = activeDrivers[driverId]?.socketId;
+          if (pSock) io.to(pSock).emit('waitingResumed', {
+            rideId: rIdStr,
+            message: 'Driver still waiting. Charges resumed.'
+          });
+          if (dSock) io.to(dSock).emit('waitingResumed', { rideId: rIdStr });
+        }
+      } catch (e) {
+        console.error('Grace period check failed:', e.message);
+      }
+    }, GRACE_MS);
+
   } catch (e) {
+	  socketLogger.error(socket.id, 'passengerComing failed', e);
     console.error('passengerComing failed:', e.message);
   }
 });
@@ -709,6 +780,7 @@ socket.on('appVisibility', ({ passengerId, role, visible }) => {
 				  const vt = String(rows[0].vehicle_type).toUpperCase();
 				  socket.join(`drivers:${vt}`);
 				  if (activeDrivers[userId]) activeDrivers[userId].vehicleType = vt;
+				  socketLogger.connected(socket.id, driverId, 'driver');
 				}
 			  } catch (e) { console.warn('rejoin room failed:', e.message); }
 			}
@@ -1006,13 +1078,14 @@ socket.on('driver-go-offline', async (data) => {
 
               const arrivalData = {
                 rideId: activeRideId,
-                remainingSeconds: 480
+                remainingSeconds: 300
               };
 
               if (pSockId) io.to(pSockId).emit('waitingWarning', arrivalData);
               io.to(socket.id).emit('waitingWarning', arrivalData);
 
               startWaitingChargeTimer(activeRideId, pId, userId);
+			  console.log(`⏳ Waiting timer started for ${activeRideId}`);
             }
           }
         }
@@ -1105,6 +1178,7 @@ if (movedForGeocode && !tracker.isGeocoding) {
     } // 🔚 ride block end
 
   } catch (e) {
+	  socketLogger.error(socket.id, 'driverLocationUpdate error', e);
     console.warn('driverLocationUpdate error:', e);
   }
 });
@@ -1329,63 +1403,6 @@ const rideRequestPayload = {
   delete rideNotifiedDrivers[extId];
 }, 10 * 60 * 1000); // 10 minutes
 
-//closing this line for little enhanment
-
-// for (const c of candidates) {
-  // try {
-    // const current = activeDrivers[c.driverId];
-	
-
-
-    // // 🟢 CASE 1: App foreground → SOCKET ONLY
-// if (current?.socketId && current.isForeground === true) {
-
-  // // 🔥🔥🔥 YAHI WO CHECK HAI 🔥🔥🔥
-  // if (current.isOnActiveRide === true) {
-
-    // // 🧩 DRIVER BUSY → QUEUE ME DAALO
-    // await pool.query(
-      // `
-      // UPDATE rides
-      // SET driver_id = $1,
-          // status = 'QUEUED_CONFIRMED'
-      // WHERE external_id = $2
-      // `,
-      // [Number(c.driverId), extId]
-    // );
-
-    // console.log(`🧩 Ride ${extId} queued for busy driver ${c.driverId}`);
-
-    // // ❌ is driver ko popup mat dikhao
-    // continue;
-  // }
-
-  // // 🟢 DRIVER FREE → NORMAL FLOW
-  // io.to(current.socketId).emit('newRideRequest', rideRequestPayload);
-// }
-
-    // // 🔔 CASE 2: App background / killed → NOTIFICATION ONLY
-    // else {
-      // await sendNotificationToUser(
-        // c.driverId,
-        // '🚕 New Ride Request',
-        // `Pickup nearby • ₹${finalAmountRupees}`,
-        // {
-          // type: 'NEW_RIDE',
-          // rideId: String(extId),
-          // sentAt: new Date().toISOString(),
-        // }
-      // );
-    // }
-
-    // notified++;
-    // rideNotifiedDrivers[extId].add(String(c.driverId));
-  // } catch (e) {
-    // console.warn(`Notify failed for driver ${c.driverId}:`, e.message);
-  // }
-// }
-//closing this line 13042026
-
 
 await Promise.all(
   candidates.map(async (c) => {
@@ -1460,6 +1477,14 @@ await Promise.all(
     }
 
     console.log(`🟢 Ride ${extId} created, notified ${notified} driver(s)`);
+	rideLogger.created(pool, {
+  rideId: extId,
+  passengerId,
+  vehicleType: requestedVehicleType,
+  estimatedFare: finalAmountRupees,
+  distanceKm,
+  isScheduled: false,
+});
 	
 	// 🔥 AUTO-EXPIRE RIDE AFTER 30 SECONDS
 setTimeout(async () => {
@@ -1491,6 +1516,7 @@ setTimeout(async () => {
 }, 30_000);
 
 	} catch (err) {
+		socketLogger.error(socket.id, 'requestRide handler error:', e);
     console.error('requestRide handler error:', err);
     socket.emit('rideCreateError', { message: 'Internal server error' });
   }
@@ -1533,6 +1559,7 @@ if (dSid) {
 
     console.log(`🔁 Resent ride ${rideId} to driver ${driverId}`);
   } catch (e) {
+	  socketLogger.error(socket.id, 'requestRideResend error', e);
     console.error('requestRideResend error:', e);
   }
 });
@@ -1580,6 +1607,7 @@ if (dSid) {
                 };
             }
         } catch (e) {
+			socketLogger.error(socket.id, 'Failed to fetch full driver details', e);
             console.error("Failed to fetch full driver details:", e);
         }
 
@@ -1768,8 +1796,15 @@ if (activeDrivers[String(driverId)]) {
 });
 
         console.log(`✅ Driver ${driverId} accepted ${rideId} for passenger ${passengerName}`);
+		rideLogger.accepted(pool, {
+  rideId,
+  driverId,
+  passengerId,
+  vehicleType: rideDetails.rows[0]?.vehicle_type || null,
+});
 
     } catch (e) {
+		socketLogger.error(socket.id, 'driverAccept error', e);
         console.error('driverAccept error:', e);
     }
 });
@@ -1844,6 +1879,7 @@ const rematchExclude = Array.from(rideBlockedDrivers[rideId]);
 }
 
 	  } catch (e) {
+		  socketLogger.error(socket.id, 'driverReject:', e);
 		console.warn('driverReject error:', e);
 	  }
 	});
@@ -2037,98 +2073,11 @@ delete global.routeDeviationConsent?.[rideId];
 
 
   } catch (e) {
+	  socketLogger.error(socket.id, 'driverCancel error:', e);
     console.warn('driverCancel error:', e);
   }
 });
 
-		
-
-		// socket.on('cancelRide', async (payload = {}) => {
-		  // try {
-			// const rideId = payload.rideId?.toString();
-			// const passengerId = payload.userId?.toString() || payload.passengerId?.toString();
-			// if (rideId) {
-			  // await pool.query(
-				// `UPDATE rides SET status='CANCELLED', cancelled_at=NOW(), cancelled_by='PASSENGER'
-				  // WHERE external_id=$1`,
-				// [rideId]
-			  // );
-			  // const { rows } = await pool.query(`SELECT driver_id FROM rides WHERE external_id=$1`, [rideId]);
-			  // const driverId = rows?.[0]?.driver_id?.toString();
-			  // if (driverId && activeDrivers[driverId]) {
-				// io.to(activeDrivers[driverId].socketId).emit('rideCancelled', { rideId, by: 'PASSENGER' });
-			  // }
-			// }
-			// console.log(`❌ cancelRide ride=${rideId || '(no id)'} by passenger=${passengerId || '?'}`);
-		  // } catch (e) { console.warn('cancelRide error', e); }
-		// });
-		
-		// ✅ REPLACE the 'cancelRide' handler in socket.js with this one
-
-	// socket.on('cancelRide', async (payload = {}) => {
-	  // try {
-		// const rideId = payload.rideId?.toString();
-		// const passengerId = payload.userId?.toString() || payload.passengerId?.toString();
-
-		// if (!rideId) {
-		  // console.warn('cancelRide called without a rideId.');
-		  // return;
-		// }
-
-		// console.log(`❌ Passenger ${passengerId || '?'} is attempting to cancel ride ${rideId}`);
-
-		// // First, get the driver_id BEFORE updating the ride status
-		// const rideQuery = await pool.query(
-			// `SELECT driver_id FROM rides WHERE external_id = $1`,
-			// [rideId]
-		// );
-
-		// const driverId = rideQuery.rows[0]?.driver_id?.toString();
-
-		// // Now, update the ride status in the database
-		// await pool.query(
-		  // `UPDATE rides
-			  // SET status = 'CANCELLED',
-				  // cancelled_at = NOW(),
-				  // cancelled_by = 'PASSENGER'
-			// WHERE external_id = $1`,
-		  // [rideId]
-		// );
-
-		// // --- THIS IS THE CRUCIAL FIX ---
-		// // If a driver was assigned to this ride, notify them.
-		// if (driverId) {
-		 // const dKey = String(driverId);
-// const driverSocketId = activeDrivers[dKey]?.socketId;
-		  // if (driverSocketId) {
-			// console.log(`📢 Notifying driver ${driverId} on socket ${driverSocketId} that the ride was cancelled.`);
-			// // Use a clear, specific event name
-			// io.to(driverSocketId).emit('rideCancelledByPassenger', {
-			  // rideId: rideId,
-			    // type: rideId.startsWith('sched_') ? 'SCHEDULED' : 'NORMAL',
-			  // message: 'The passenger has cancelled the ride.'
-			// });
-			// io.to(driverSocketId).emit('dismissRideRequest', {
-  // rideId,
-  // reason: 'cancelled_by_passenger'
-// });
-			
-		  // } else {
-			// console.log(`Driver ${driverId} was assigned but is not actively connected.`);
-		  // }
-		// }
-		// // --- END OF FIX ---
-		 // delete rideNotifiedDrivers[String(rideId)];
-
-	  // } catch (e) {
-		// console.error('Error during cancelRide:', e);
-	  // }
-	  
-	 
-
-	// });
-	
-	
 socket.on('cancelRide', async (payload = {}) => {
   try {
     const rideId = payload.rideId?.toString();
@@ -2211,12 +2160,15 @@ socket.on('cancelRide', async (payload = {}) => {
       const pId = row.passenger_id?.toString();
       const waitingAmt = parseFloat(row.waiting_amount || 0);
 
-      // 2️⃣ Timer cleanup
-      if (waitingTimers[rideId]) {
-        clearInterval(waitingTimers[rideId]);
-        delete waitingTimers[rideId];
-        console.log(`⏱️ Timer stopped for normal ride: ${rideId}`);
-      }
+    if (waitingTimers[rideId]) {
+  clearInterval(waitingTimers[rideId]);
+  delete waitingTimers[rideId];
+  console.log(`⏱️ Timer stopped for normal ride: ${rideId}`);
+}
+if (graceTimers[rideId]) {
+  clearTimeout(graceTimers[rideId]);
+  delete graceTimers[rideId];
+}
 	  
 	  const pSockId = activePassengers[pId]?.socketId;
 const dSockId = driverId ? activeDrivers[driverId]?.socketId : null;
@@ -2286,6 +2238,7 @@ try {
 	
 
   } catch (e) {
+	  socketLogger.error(socket.id, 'cancelRide error:', e);
     console.error('cancelRide error:', e);
   }
 });
@@ -2314,6 +2267,7 @@ socket.on('driver-check-active-ride', async ({ driverId }) => {
       });
     }
   } catch (e) {
+	   socketLogger.error(socket.id, 'driver-check-active-ride error:', e);
     console.error('driver-check-active-ride error:', e);
     socket.emit('driver-active-ride-status', { hasActiveRide: false });
   }
@@ -2330,95 +2284,6 @@ socket.on('driverForceResetActiveRide', ({ driverId }) => {
 });
 
 
-
-	   // In socket.js
-	// ✅ PASTE THIS NEW, FINAL, AND CORRECT 'verifyOtp' HANDLER
-	// In socket.js
-	// ❌ DELETE your old 'verifyOtp' listener.
-	// ✅ PASTE this new, final, and absolutely correct version.
-
-	// socket.on('verifyOtp', async (data) => {
-  // try {
-    // const { rideId, otp } = data;
-
-    // // ✅✅✅ THE FINAL FIX IS HERE ✅✅✅
-    // // 1. Force the driverId to be a clean number.
-    // const driverId = Number(data.driverId);
-
-    // // 2. Add a strong guard to check for valid data.
-    // if (!rideId || !otp || !driverId || isNaN(driverId)) {
-      // return socket.emit('otpFailed', { rideId, message: 'Missing or invalid data for OTP verification.' });
-    // }
-    // // ✅✅✅ END OF FIX ✅✅✅
-
-    // // 3. The rest of the handler can now safely use the numeric driverId.
-    // const rideQuery = await pool.query(
-      // `SELECT
-          // otp,
-          // passenger_id,
-          // ST_Y(dropoff_location::geometry) as dest_lat,
-          // ST_X(dropoff_location::geometry) as dest_lon
-       // FROM rides
-       // WHERE external_id = $1 AND driver_id = $2`, // This query will now work correctly!
-      // [rideId, driverId] // Use the clean, numeric driverId
-    // );
-
-    // if (rideQuery.rows.length === 0) {
-      // // This error will now only appear for genuinely incorrect rides.
-      // return socket.emit('otpFailed', { rideId, message: 'Ride not found or not assigned to you.' });
-    // }
-
-    // const ride = rideQuery.rows[0];
-
-    // // Verify the OTP (this part is correct)
-    // if (ride.otp !== otp) {
-      // return socket.emit('otpFailed', { rideId, message: 'Incorrect OTP provided.' });
-    // }
-
-    // // Update ride status and driver's stats (this part is correct)
-    // await pool.query(
-      // "UPDATE rides SET status = 'IN_TRANSIT', started_at = NOW() WHERE external_id = $1",
-      // [rideId]
-    // );
-    // await pool.query(
-      // `UPDATE drivers SET accepted_count = COALESCE(accepted_count, 0) + 1 WHERE user_id = $1`,
-      // [driverId] // Use the numeric driverId here too
-    // );
-
-    // // Send destination data to the driver (this part is correct)
-    // const passengerId = ride.passenger_id?.toString();
-    // const driverSocketId = activeDrivers[driverId]?.socketId;
-    // const passengerSocketId = activePassengers[passengerId]?.socketId;
-
-    // if (driverSocketId) {
-      // const destinationPayload = {
-        // latitude: ride.dest_lat,
-        // longitude: ride.dest_lon,
-      // };
-      // io.to(driverSocketId).emit('otpVerified', {
-        // rideId: rideId,
-        // destination: destinationPayload,
-      // });
-    // }
-	
-
-
-    // // Notify passenger (this part is correct)
-		// // Original bug: io.to(passengerSocketId).emit('otpVerified', { rideId: rideId });
-    // if (passengerSocketId) {
-      // io.to(passengerSocketId).emit('rideStarted', {
-          // rideId: rideId,
-          // startedAt: new Date().toISOString()
-      // });
-    // }
-
-    // console.log(`🔓 OTP Verified for ride ${rideId}. Trip is now IN_TRANSIT.`);
-
-  // } catch (error) {
-    // console.error(`❌ Error in verifyOtp for ride ${data.rideId}:`, error);
-    // socket.emit('otpFailed', { rideId: data.rideId, message: 'A server error occurred.' });
-  // }
-// });
 socket.on('verifyOtp', async (data) => {
   try {
     const { rideId, otp } = data;
@@ -2462,10 +2327,14 @@ const passengerSocketId = passengerId ? activePassengers[passengerId]?.socketId 
       });
     }
 	
-	if (waitingTimers[rideId]) {
+if (waitingTimers[rideId]) {
   clearInterval(waitingTimers[rideId]);
   delete waitingTimers[rideId];
   console.log(`⏱️ Waiting timer stopped for ride ${rideId}`);
+}
+if (graceTimers[rideId]) {
+  clearTimeout(graceTimers[rideId]);
+  delete graceTimers[rideId];
 }
 
 
@@ -2534,6 +2403,7 @@ const isPassengerFirstRideForOtp = freeRideCheck.rowCount > 0;
 
 
   } catch (e) {
+	  socketLogger.error(socket.id, 'verifyOtp error:', e);
     console.error('verifyOtp error:', e);
   }
 });
@@ -2651,6 +2521,7 @@ if (activeDrivers[String(driverId)]) {
 
   } catch (err) {
     await client.query("ROLLBACK");
+	socketLogger.error(socket.id, 'verify-scheduled-otp error:', e);
     console.error(`❌ verify-scheduled-otp failed:`, err);
     socket.emit("otpFailed", { rideId: data.rideId, message: err.message });
   } finally {
@@ -2923,6 +2794,8 @@ console.log(`✅ Previous penalties cleared for passenger ${passengerId}`);
 
 // --- COMMIT FIRST ---
 await client.query('COMMIT');
+
+
 setImmediate(() => {
   logRide(pool, {
     rideId,
@@ -2932,6 +2805,15 @@ setImmediate(() => {
     paymentStatus: paidByCash ? 'CASH' : 'ONLINE',
     fare: finalTotalR,
   });
+  
+  rideLogger.completed(pool, {
+  rideId,
+  driverId,
+  passengerId,
+  finalFare: finalTotalR,
+  paymentMode: paidByCash ? 'CASH' : 'ONLINE',
+  distanceKm: rideRow.distance_km || null,
+});
 
   logPayment(pool, {
     rideId,
@@ -3130,6 +3012,7 @@ if (dSid) io.to(dSid).emit('rideCompleted', {
 
   } catch (e) {
 	await client.query('ROLLBACK');
+	socketLogger.error(socket.id, 'completeRide transaction error', e);
 	console.error('completeRide transaction error. Rolled back.', e);
   } finally {
 	client.release();
@@ -3188,6 +3071,7 @@ socket.on('submitDriverRating', async ({ rideId, driverId, passengerId, rating, 
 
     } catch (e) {
         await client.query('ROLLBACK');
+		socketLogger.error(socket.id, 'submitDriverRating error', e);
         console.error('❌ Error in submitDriverRating:', e);
     } finally {
         client.release();
@@ -3440,6 +3324,7 @@ delete global.rideNotifiedDrivers?.[rideId];
 
     } catch (e) {
         await client.query('ROLLBACK');
+		socketLogger.error(socket.id, `[accept-scheduled-ride] Transaction failed for ride ${rideId}:`, e);
         console.error(`[accept-scheduled-ride] Transaction failed for ride ${rideId}:`, e);
         socket.emit('action-failed', { message: e.message || "Could not accept ride." });
     } finally {
@@ -3511,6 +3396,7 @@ socket.on('start-driving-to-scheduled-pickup', async (data) => {
 
     } catch (e) {
         await client.query('ROLLBACK');
+		socketLogger.error(socket.id, `[start-driving] Transaction failed for ride ${rideId}:`, e);
         console.error(`[start-driving] Transaction failed for ride ${rideId}:`, e);
     } finally {
         client.release();
@@ -3586,6 +3472,7 @@ socket.emit('scheduledRideArrivedAck', {
 
 
   } catch (e) {
+	  socketLogger.error(socket.id, `[driver-arrived-scheduled] Error for ride ${rideId}:`, e);
     console.error(`[driver-arrived-scheduled] Error for ride ${rideId}:`, e);
   } finally {
     client.release();
@@ -3636,6 +3523,7 @@ socket.on('driver-request-ride-resend', async ({ driverId, rideId }) => {
 
     console.log(`🔁 Resent ride ${rideId} to driver ${driverId}`);
   } catch (e) {
+	  socketLogger.error(socket.id, 'driver-request-ride-resend error:', e);
     console.error('driver-request-ride-resend error:', e);
   }
 });
@@ -3709,18 +3597,28 @@ socket.on('driverConfirmQueuedRide', async ({ rideId, driverId }) => {
 });
 
 
-
+ 
 // 🛡️ ROUTE DEVIATION (SOFT) — OPTION A
 socket.on('route_deviation_soft', async (payload = {}) => {
   try {
     // ✅ PRODUCTION ENABLED — manual dev-test button is guarded in Flutter by ENABLE_DEV_ROUTE_DEVIATION=false
     // ⛔ Guard: payload empty
     if (!payload?.rideExternalId || !payload?.driverId) return;
+	
+	   await rideLogger.deviated(pool, {
+      rideId:      payload.rideExternalId,
+      driverId:    payload.driverId,
+      passengerId: payload.passengerId || null,
+      distanceM:   payload.distanceMeters || null,
+      durationSec: payload.durationSeconds || null,
+    });
+
 
     // 👉 Delegate ALL logic (no brain here)
     await SafetyService.handleRouteDeviationSoft(socket, payload);
 
   } catch (err) {
+	  socketLogger.error(socket.id, 'route_deviation_soft error', err);
     console.error('❌ route_deviation_soft error:', err.message);
   }
 });
@@ -3760,6 +3658,7 @@ socket.on('driver_route_explanation', async (payload = {}) => {
     });
 
   } catch (e) {
+	  socketLogger.error(socket.id, 'driver_route_explanation error', e);
     console.error('driver_route_explanation error:', e.message);
   }
 });
@@ -3816,6 +3715,7 @@ socket.on('route_change_decision', async (payload = {}) => {
     );
 
   } catch (e) {
+	  socketLogger.error(socket.id, 'route_change_decision error', e);
     console.error('route_change_decision error:', e.message);
   }
 });
@@ -3871,6 +3771,7 @@ socket.on('terminate_ride', async (payload = {}) => {
     delete lastRouteSnapshotAt[String(rideExternalId)];
     delete extraDistanceTrackers[rideExternalId];
   } catch (e) {
+	  socketLogger.error(socket.id, 'terminate_ride error', e);
     console.error('terminate_ride error:', e.message);
   }
 });
@@ -4007,6 +3908,7 @@ sosTimers[rideExternalId] = setTimeout(async () => {
     console.log(`🚨 SOS triggered for ${rideExternalId}`);
 
   } catch (e) {
+	  socketLogger.error(socket.id, 'sos_triggered error', e);
     console.error('sos_triggered error:', e.message);
   }
 });
@@ -4044,6 +3946,7 @@ socket.on('sos_resolved', async ({ rideExternalId, adminId }) => {
     console.log(`✅ SOS resolved for ${rideExternalId}`);
 
   } catch (e) {
+	  socketLogger.error(socket.id, 'sos_resolved error ', e);
     console.error('sos_resolved error:', e.message);
   }
 });
@@ -4180,6 +4083,7 @@ socket.on('driver_extra_distance_request', async (payload) => {
     console.log(`🛣️ Extra distance request sent for ${rideId}`);
 
   } catch (e) {
+	  socketLogger.error(socket.id, 'driver_extra_distance_request error ', e);
     console.error('driver_extra_distance_request error:', e.message);
   }
 });
@@ -4225,6 +4129,7 @@ socket.on('passenger_extra_distance_response', async ({ rideId, passengerId, app
       console.log(`❌ Extra distance REJECTED for ${rideId}`);
     }
   } catch (e) {
+	  socketLogger.error(socket.id, 'passenger_extra_distance_response error ', e);
     console.error('passenger_extra_distance_response error:', e.message);
   }
 });
@@ -4241,13 +4146,14 @@ socket.on('passenger_extra_distance_response', async ({ rideId, passengerId, app
 	 d.isForeground = false;
 
 
-      console.log(`🧹 Soft-disconnected driver ${driverId}`);
+       socketLogger.disconnected(socket.id, driverId, 'driver');
       break;
     }
   }
 
 for (const [pid, p] of Object.entries(activePassengers)) {
   if (p?.socketId === socket.id) {
+	  socketLogger.disconnected(socket.id, pid, 'passenger');
     delete activePassengers[pid];
     break;
   }

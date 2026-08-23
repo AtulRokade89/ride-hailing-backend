@@ -524,17 +524,14 @@ router.get('/active-status/:passengerId', async (req, res) => {
   const passengerId = req.params.passengerId;
 
   try {
-    // 🛑 CRITICAL FIX: Filter for ONLY TRULY ACTIVE STATUSES 🛑
-    // This query ensures 'SCHEDULED' rides are ignored.
-    const result = await pool.query(
-      `SELECT external_id, status, driver_id, pickup_address
-       FROM rides WHERE passenger_id = $1 
-         AND driver_id is not null  <--- ADDED CONDITION
-        AND status IN ('PENDING', 'ACCEPTED', 'ARRIVED', 'IN_TRANSIT', 'DISPUTED')
-AND completed_at IS NULL
-  AND cancelled_at IS NULL
-       ORDER BY id DESC
-       LIMIT 1`,
+		const result = await pool.query(
+		`SELECT external_id, status, driver_id, pickup_address FROM rides WHERE passenger_id = $1 
+      AND driver_id is not null 
+      AND status IN ('PENDING', 'ACCEPTED', 'ARRIVED', 'IN_TRANSIT', 'DISPUTED')
+		  AND completed_at IS NULL
+		  AND cancelled_at IS NULL
+    ORDER BY id DESC
+    LIMIT 1`,
       [passengerId]
     );
 
@@ -556,6 +553,11 @@ AND completed_at IS NULL
   } catch (e) {
     console.error('active-status route error:', e);
     return res.status(500).json({ error: 'server_error' });
+	
+	
+	console.log(e.position);
+console.log(e.message);
+console.log(resultQuery);
   }
 });
 
