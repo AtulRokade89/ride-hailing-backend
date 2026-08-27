@@ -1,263 +1,30 @@
-// // ride-hailing-backend/controllers/authController.js
-
-// // 1. CommonJS Imports
-// const bcrypt = require('bcryptjs');
-// const jwt = require('jsonwebtoken');
-// const { Pool } = require('pg');
-
-// // 2. Initialize the database connection pool (from server.js context)
-// const pool = new Pool({
-    // user: process.env.DB_USER,
-    // host: process.env.DB_HOST,
-    // database: process.env.DB_NAME,
-    // password: process.env.DB_PASSWORD,
-    // port: process.env.DB_PORT,
-// });
-
-// // --- User Registration ---
-// const register = async (req, res) => {
-    // const { name, email, password, role, phone_number } = req.body;
-
-    // if (!['passenger', 'driver'].includes(role)) {
-        // return res.status(400).json({ error: 'Invalid role specified.' });
-    // }
-
-    // try {
-        // // 1. Check if user already exists
-        // const existingUser = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
-        // if (existingUser.rows.length > 0) {
-            // return res.status(400).json({ error: 'User with this email already exists.' });
-        // }
-
-        // // 2. Hash the password
-        // // Note: bcryptjs v3.0.2 requires slightly older syntax but this should work:
-        // const salt = await bcrypt.genSalt(10);
-        // const hashedPassword = await bcrypt.hash(password, salt);
-
-        // // 3. Insert the new user into the database
-        // const newUser = await pool.query(
-            // 'INSERT INTO users (name, email, password_hash, role, phone_number) VALUES ($1, $2, $3, $4, $5) RETURNING id, role',
-            // [name, email, hashedPassword, role, phone_number]
-        // );
-
-        // const userId = newUser.rows[0].id;
-        // const userRole = newUser.rows[0].role;
-
-        // // 4. Create and sign JWT Token
-        // const token = jwt.sign({ id: userId, role: userRole }, process.env.JWT_SECRET, {
-            // expiresIn: '7d', // Token expires in 7 days
-        // });
-
-        // // 5. Respond with the token and user details
-        // res.status(201).json({ token, userId, role: userRole });
-
-    // } catch (error) {
-        // console.error('Registration error:', error);
-        // res.status(500).json({ error: 'Server error during registration.' });
-    // }
-// };
-
-// const login = async (req, res) => {
-  // const { email, password } = req.body;
-
-  // try {
-    // // 1️⃣ Fetch user info + password + driver details
-    // const userResult = await pool.query(`
-      // SELECT
-        // u.id,
-        // u.role,
-        // u.password_hash,
-        // dv.status AS verification_status,
-        // d.is_blocked
-      // FROM users u
-      // LEFT JOIN driver_verifications dv ON u.id = dv.user_id
-      // LEFT JOIN drivers d ON u.id = d.user_id
-      // WHERE u.email = $1
-    // `, [email]);
-
-    // // 2️⃣ Validate user
-    // if (userResult.rows.length === 0) {
-      // return res.status(400).json({
-        // errorType: 'email',
-        // error: 'Wrong username. Please enter the correct email address.',
-      // });
-    // }
-
-    // const user = userResult.rows[0];
-
-    // // 3️⃣ Validate password
-    // const isMatch = await bcrypt.compare(password, user.password_hash);
-    // if (!isMatch) {
-      // return res.status(400).json({
-        // errorType: 'password',
-        // error: 'Wrong password. Please try again.',
-      // });
-    // }
-
-    
-	
-	// // if (user.role === 'driver') {
-  // // const duesQuery = `
-    // // SELECT
-      // // SUM(amount_paise) AS total_due,
-      // // min(created_at) AS last_due_date
-    // // FROM wallet_ledger
-    // // WHERE driver_id = $1
-      // // AND is_settled = FALSE
-      // // AND type = 'CASH_RECEIVED';
-  // // `;
-  // // const duesResult = await pool.query(duesQuery, [user.id]);
-  // // const totalDuePaise = parseInt(duesResult.rows[0].total_due || '0', 10);
-  // // const lastDueDate = duesResult.rows[0].last_due_date
-    // // ? new Date(duesResult.rows[0].last_due_date)
-    // // : null;
-
-  // // // 🧮 If unpaid dues exist and oldest due is more than 7 days ago → block
-  // // const today = new Date();
-  // // const daysDiff = lastDueDate
-    // // ? Math.floor((today - lastDueDate) / (1000 * 60 * 60 * 24))
-    // // : 0;
-
-  // // if (totalDuePaise > 0 && daysDiff > 7) {
-    // // console.log(
-      // // `[BLOCKED] Driver ${user.id} - dues ₹${(totalDuePaise / 100).toFixed(2)}, last due ${lastDueDate.toISOString()}`
-    // // );
-
-    // // // 🔹 Optionally update DB to mark as blocked
-    // // await pool.query(`UPDATE drivers SET is_blocked = TRUE WHERE user_id = $1`, [user.id]);
-
-    // // return res.status(403).json({
-      // // error: 'Account blocked due to overdue payments.',
-      // // verificationStatus: 'blocked_due_to_dues',
-      // // totalDuePaise: totalDuePaise,
-      // // userId: user.id,
-    // // });
-  // // }
-// // }
-// // Inside the login function...
-
-// // ✅ PASTE THIS ENTIRE BLOCK TO REPLACE YOUR CURRENT `if (user.role === 'driver')` BLOCK
-
-// if (user.role === 'driver') {
-  // // --- 1. CALCULATE BOTH DUE AMOUNTS FIRST ---
-
-  // // --- Calculate ONLY Overdue Dues (for deciding if we should block) ---
-  // const overdueQuery = await pool.query(
-    // `SELECT COALESCE(SUM(amount_paise), 0) AS total_due_paise,
-            // array_agg(ride_external_id) AS ride_ids
-     // FROM wallet_ledger
-     // WHERE driver_id = $1
-       // AND type = 'CASH_RECEIVED'
-       // AND is_settled = FALSE
-       // AND due_date IS NOT NULL
-       // AND due_date <= NOW()`,
-    // [user.id]
-  // );
-  // const totalDuePaise = parseInt(overdueQuery.rows[0]?.total_due_paise, 10) || 0;
-  // const dueRideIds = overdueQuery.rows[0]?.ride_ids || [];
-
-  // // --- Calculate the GRAND TOTAL of All Unsettled Dues (for displaying in popups) ---
-  // const allDuesQuery = await pool.query(
-    // `SELECT COALESCE(SUM(amount_paise), 0) AS total_unsettled_paise,
-            // MIN(due_date) AS next_due_date
-     // FROM wallet_ledger
-     // WHERE driver_id = $1
-       // AND type = 'CASH_RECEIVED'
-       // AND is_settled = FALSE`,
-    // [user.id]
-  // );
-  // const totalUnsettledPaise = parseInt(allDuesQuery.rows[0]?.total_unsettled_paise, 10) || 0;
-  // const nextDueDate = allDuesQuery.rows[0]?.next_due_date || null;
-
-
-  // // --- 2. NOW, MAKE THE DECISION TO BLOCK ---
-  // // This 'if' block now runs *after* all variables have been created.
-  // if (totalDuePaise > 0) {
-    // // If there is any overdue amount, block the account.
-    // console.log(`[BLOCKED] Driver ${user.id} - Overdue: ${totalDuePaise}, Total Unsettled: ${totalUnsettledPaise}`);
-
-    // // Set the is_blocked flag in the database
-    // await pool.query(`UPDATE drivers SET is_blocked = TRUE WHERE user_id = $1`, [user.id]);
-
-    // // Return the 403 error. Both variables now exist and can be used safely.
-    // return res.status(403).json({
-      // message: 'Account blocked due to unsettled cash dues.',
-      // verificationStatus: 'blocked_due_to_dues',
-      // totalDuePaise: totalDuePaise,          // The overdue amount (for records)
-      // upcomingDuePaise: totalUnsettledPaise, // ✅ The GRAND TOTAL amount (for the popup)
-      // dueRideIds: dueRideIds,
-      // userId: user.id,
-    // });
-  // }
-
-  // // --- 3. IF NOT BLOCKED ---
-  // // Attach the grand total to the successful response for the reminder popup.
-  // req.upcomingDuePaise = totalUnsettledPaise;
-  // req.nextDueDate = nextDueDate;
-// }
-
-
-    // // 5️⃣ Generate token if passed all checks
-    // const token = jwt.sign(
-      // { id: user.id, role: user.role },
-      // process.env.JWT_SECRET,
-      // { expiresIn: '7d' }
-    // );
-
-    // // 6️⃣ Success response
-// const successPayload = {
-  // token,
-  // userId: user.id,
-  // role: user.role,
-  // verificationStatus:
-    // user.role === 'driver'
-      // ? user.verification_status || 'pending_verification'
-      // : 'n/a',
-// };
-// if (user.role === 'driver') {
-  // // If we set these above, attach them; otherwise default to 0/null
-   // successPayload.upcomingDuePaise = req.upcomingDuePaise ?? 0;
-  // successPayload.nextDueDate = req.nextDueDate ?? null;
-// }
-
-// res.status(200).json(successPayload);
-  // } catch (error) {
-    // console.error('Login error:', error);
-    // res.status(500).json({ error: 'Server error during login.' });
-  // }
-// };
-
-
-
-// // 3. Final CommonJS Export
-// module.exports = {
-    // register,
-    // login,
-// };
-
-
-
-
 // ride-hailing-backend/controllers/authController.js
 
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-//const { Pool } = require('pg');
+const { Pool } = require('pg');
 const nodemailer = require('nodemailer');
 const crypto = require('crypto');
 const twilio = require('twilio');
-//const pool = global.pool;
-const pool = require('../db');
 
 
 // Initialize the database connection pool
-// const pool = new Pool({
-    // user: process.env.DB_USER,
-    // host: process.env.DB_HOST,
-    // database: process.env.DB_NAME,
-    // password: process.env.DB_PASSWORD,
-    // port: process.env.DB_PORT,
-// });
+const pool = new Pool({
+    user: process.env.DB_USER,
+    host: process.env.DB_HOST,
+    database: process.env.DB_NAME,
+    password: process.env.DB_PASSWORD,
+    port: process.env.DB_PORT,
+});
+
+const generateSafeCode = (name, phone, userId) => {
+    // Name null na ho isliye safety check
+    const safeName = name || 'USR';
+    const prefix = safeName.substring(0, 3).toUpperCase().replace(/\s/g, 'X');
+    const suffix = phone ? phone.substring(phone.length - 4) : '0000';
+    // userId add karne se UNIQUE constraint kabhi fail nahi hoga
+    return `${prefix}${suffix}${userId}`; 
+};
 
 // --- Configure Nodemailer for Sending Emails ---
 // IMPORTANT: For production, use a real email service like SendGrid, Mailgun, or AWS SES.
@@ -279,19 +46,14 @@ const twilioClient = twilio(
 
 // --- User Registration (Upgraded for Verification) ---
 const register = async (req, res) => {
- const { name, email, password, role, phone_number } = req.body || {};
+     const { name, email, password, role, phone_number, referred_by_code, device_id } = req.body;
 
-if (!name || !email || !password || !role) {
-  return res.status(400).json({ error: 'Missing required fields' });
-}
-const normalizedRole = role?.toLowerCase();
-
-    if (!['passenger', 'driver'].includes(normalizedRole)) {
+    if (!['passenger', 'driver'].includes(role)) {
         return res.status(400).json({ error: 'Invalid role specified.' });
     }
 
     // --- Passenger Registration with Verification ---
-    if (normalizedRole  === 'passenger') {
+    if (role === 'passenger') {
         const client = await pool.connect(); // Get a client from the pool for a transaction
         try {
             await client.query('BEGIN'); // Start the transaction
@@ -313,14 +75,43 @@ const normalizedRole = role?.toLowerCase();
 
             // 3. Insert or Update the 'users' table (Upsert logic)
             const userQuery = `
-                INSERT INTO users (name, email, password_hash, phone_number, role)
-                VALUES ($1, $2, $3, $4, 'passenger')
+                INSERT INTO users (name, email, password_hash, phone_number, role, device_id)
+                VALUES ($1, $2, $3, $4, 'passenger', $5)
                 ON CONFLICT (email) DO UPDATE
                 SET name = $1, password_hash = $3, phone_number = $4
                 RETURNING id;
             `;
-            const newUser = await client.query(userQuery, [name, email, hashedPassword, phone_number]);
+            const newUser = await client.query(userQuery, [name, email, hashedPassword, phone_number, device_id || null]);
             const userId = newUser.rows[0].id;
+        //referal logic
+         const passengerRefCode = generateSafeCode(name, phone_number, userId);
+            let referredByUserId = null;
+            let referredByRole = 'self';
+
+            // Ab 'referred_by_code' defined hai, toh error nahi aayega
+            if (referred_by_code && referred_by_code.trim() !== '') {
+                const refOwner = await client.query(
+                    "SELECT user_id, user_role FROM referrals WHERE referral_code = $1 LIMIT 1",
+                    [referred_by_code.trim()]
+                );
+                if (refOwner.rows.length > 0) {
+                    referredByUserId = refOwner.rows[0].user_id;
+                    referredByRole = refOwner.rows[0].user_role;
+                }
+            }
+
+            const expiryDate = new Date();
+            expiryDate.setDate(expiryDate.getDate() + 30);
+
+            await client.query(
+                `INSERT INTO referrals (
+                    user_id, user_role, referral_code, 
+                    referred_by_code, referred_by_user_id, referred_by_role,
+                    first_ride_free_used, first_ride_free_expires_at
+                ) VALUES ($1, 'passenger', $2, $3, $4, $5, FALSE, $6)
+                ON CONFLICT (user_id) DO NOTHING`,
+                [userId, passengerRefCode, referred_by_code || null, referredByUserId, referredByRole, expiryDate]
+            );
 
             // 4. Generate token and create the verification entry
             const verificationToken = crypto.randomBytes(32).toString('hex');
@@ -384,24 +175,101 @@ const normalizedRole = role?.toLowerCase();
         }
     }
 
-    // --- Existing Driver Registration Logic (can be upgraded similarly later) ---
-    if (normalizedRole  === 'driver') {
-        // Your existing driver registration code can go here.
-        // For now, it will proceed without email verification for drivers.
+    // --- Driver Registration with Referral Code Generation ---
+    if (role === 'driver') {
+        const client = await pool.connect();
         try {
+            await client.query('BEGIN');
+
+            // 1. Hash password
             const salt = await bcrypt.genSalt(10);
             const hashedPassword = await bcrypt.hash(password, salt);
-            const newUser = await pool.query(
-                'INSERT INTO users (name, email, password_hash, role, phone_number) VALUES ($1, $2, $3, $4, $5) RETURNING id, role',
-                [name, email, hashedPassword, normalizedRole, phone_number]
+
+            // 2. Insert user (with device_id)
+            const newUser = await client.query(
+                `INSERT INTO users (name, email, password_hash, role, phone_number, device_id)
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 RETURNING id, role`,
+                [name, email, hashedPassword, role, phone_number, device_id || null]
             );
-            const userId = newUser.rows[0].id;
+            const userId   = newUser.rows[0].id;
             const userRole = newUser.rows[0].role;
+
+            // 3. Generate driver referral code
+            const driverReferralCode = phone_number
+              ? generateReferralCode(name, phone_number)
+              : null;
+
+            // 4. Resolve referred_by_code (driver referred by another driver/passenger)
+            let referredByUserId = null;
+            let referredByRole   = 'self';
+
+            if (referred_by_code && referred_by_code.trim() !== '') {
+              const refRes = await client.query(
+                `SELECT r.user_id, r.user_role
+                 FROM referrals r
+                 WHERE r.referral_code = $1
+                 LIMIT 1`,
+                [referred_by_code.trim()]
+              );
+              if (refRes.rows.length > 0) {
+                referredByUserId = refRes.rows[0].user_id;
+                referredByRole   = refRes.rows[0].user_role;
+
+                // Self-referral fraud check (same device)
+                const refDeviceRes = await client.query(
+                  `SELECT device_id FROM users WHERE id = $1`,
+                  [referredByUserId]
+                );
+                const refDevice = refDeviceRes.rows[0]?.device_id;
+                if (refDevice && refDevice === device_id) {
+                  console.warn(`🚨 Driver self-referral fraud: device ${device_id}`);
+                  await client.query(
+                    `UPDATE users SET is_suspicious = TRUE WHERE id = $1`,
+                    [referredByUserId]
+                  );
+                  referredByUserId = null;
+                  referredByRole   = 'self';
+                }
+              }
+            }
+
+            // 5. Insert referrals row for driver
+            await client.query(
+              `INSERT INTO referrals (
+                user_id, user_role, referral_code,
+                referred_by_code, referred_by_user_id, referred_by_role,
+                first_ride_free_used, first_ride_free_expires_at,
+                referrer_benefit_given, referrer_benefit_amount,
+                device_id, ip_address
+              ) VALUES ($1, 'driver', $2, $3, $4, $5, TRUE, NULL, FALSE, 50, $6, $7)
+              ON CONFLICT (user_id) DO NOTHING`,
+              [
+                userId,
+                driverReferralCode,
+                referred_by_code?.trim() || null,
+                referredByUserId,
+                referredByRole,
+                device_id || null,
+                req.ip || null,
+              ]
+            );
+            // Note: first_ride_free_used = TRUE for drivers (drivers don't get free rides)
+
+            await client.query('COMMIT');
+
             const token = jwt.sign({ id: userId, role: userRole }, process.env.JWT_SECRET, { expiresIn: '7d' });
-            return res.status(201).json({ token, userId, role: userRole });
+            return res.status(201).json({
+              token,
+              userId,
+              role: userRole,
+              referralCode: driverReferralCode, // ← Flutter mein dikhao
+            });
+
         } catch (error) {
-             console.error('Driver registration error:', error);
-             return res.status(500).json({ error: 'Server error during registration.' });
+            await client.query('ROLLBACK');
+            console.error('Driver registration error:', error);
+            return res.status(500).json({ error: 'Server error during registration.' });
         }
     }
 };
@@ -411,29 +279,26 @@ const normalizedRole = role?.toLowerCase();
 // 🎯🎯🎯 REPLACE your entire existing 'login' function with this one 🎯🎯🎯
 
 const login = async (req, res) => {
-  const { email, password } = req.body || {};
-
-if (!email || !password) {
-  return res.status(400).json({ message: 'Email and password are required' });
-}
-
+    const { email, password } = req.body;
 
     try {
         // 1️⃣ Fetch user info + verification status + block status
         // This query is perfect and already fetches what we need.
         const userResult = await pool.query(`
-            SELECT
-                u.id,
-                u.role,
-                u.password_hash,
-                dv.status AS driver_verification_status,
-                pv.is_verified AS passenger_is_verified,
-                d.is_blocked
-            FROM users u
-            LEFT JOIN driver_verifications dv ON u.id = dv.user_id AND u.role = 'driver'
-            LEFT JOIN passenger_verification pv ON u.id = pv.user_id AND u.role = 'passenger'
-            LEFT JOIN drivers d ON u.id = d.user_id AND u.role = 'driver'
-            WHERE u.email = $1
+         SELECT
+    u.id,
+    u.role,
+    u.password_hash,
+    dv.status AS driver_verification_status,
+    dv.terms_accepted,
+    pv.is_verified AS passenger_is_verified,
+    d.is_blocked,
+    d.vehicle_type
+FROM users u
+LEFT JOIN driver_verifications dv ON u.id = dv.user_id AND u.role = 'driver'
+LEFT JOIN passenger_verification pv ON u.id = pv.user_id AND u.role = 'passenger'
+LEFT JOIN drivers d ON u.id = d.user_id AND u.role = 'driver'
+WHERE u.email = $1
         `, [email]);
 
         // 2️⃣ Validate user exists
@@ -461,12 +326,14 @@ if (!email || !password) {
         // ✅✅✅ GLORIOUS VICTORY! THE LOGIC IS RESTORED! ✅✅✅
        
 if (user.role === 'driver') {
-  // --- 1. CALCULATE BOTH DUE AMOUNTS FIRST ---
+  // Your wallet_ledger amount_paise is currently being used as rupees.
+  // If later you store real paise, change this to 120000.
+  const CASH_DUE_BLOCK_LIMIT = 1200;
 
-  // --- Calculate ONLY Overdue Dues (for deciding if we should block) ---
+  // 1. Check dues whose due_date is already over
   const overdueQuery = await pool.query(
-    `SELECT COALESCE(SUM(amount_paise), 0) AS total_due_paise,
-            array_agg(ride_external_id) AS ride_ids
+    `SELECT COALESCE(SUM(amount_paise), 0) AS overdue_due,
+            MIN(due_date) AS first_overdue_due_date
      FROM wallet_ledger
      WHERE driver_id = $1
        AND type = 'CASH_RECEIVED'
@@ -475,46 +342,67 @@ if (user.role === 'driver') {
        AND due_date <= NOW()`,
     [user.id]
   );
-  const totalDuePaise = parseInt(overdueQuery.rows[0]?.total_due_paise, 10) || 0;
-  const dueRideIds = overdueQuery.rows[0]?.ride_ids || [];
 
-  // --- Calculate the GRAND TOTAL of All Unsettled Dues (for displaying in popups) ---
+  // 2. Check total unsettled cash dues
   const allDuesQuery = await pool.query(
-    `SELECT COALESCE(SUM(amount_paise), 0) AS total_unsettled_paise,
-            MIN(due_date) AS next_due_date
+    `SELECT COALESCE(SUM(amount_paise), 0) AS total_unsettled,
+            MIN(due_date) AS next_due_date,
+            array_remove(array_agg(ride_external_id), NULL) AS ride_ids
      FROM wallet_ledger
      WHERE driver_id = $1
        AND type = 'CASH_RECEIVED'
        AND is_settled = FALSE`,
     [user.id]
   );
-  const totalUnsettledPaise = parseInt(allDuesQuery.rows[0]?.total_unsettled_paise, 10) || 0;
-  const nextDueDate = allDuesQuery.rows[0]?.next_due_date || null;
 
+  const overdueDue =
+    parseInt(overdueQuery.rows[0]?.overdue_due, 10) || 0;
 
-  // --- 2. NOW, MAKE THE DECISION TO BLOCK ---
-  // This 'if' block now runs *after* all variables have been created.
-  if (totalDuePaise > 0) {
-    // If there is any overdue amount, block the account.
-    console.log(`[BLOCKED] Driver ${user.id} - Overdue: ${totalDuePaise}, Total Unsettled: ${totalUnsettledPaise}`);
+  const totalUnsettled =
+    parseInt(allDuesQuery.rows[0]?.total_unsettled, 10) || 0;
 
-    // Set the is_blocked flag in the database
-    await pool.query(`UPDATE drivers SET is_blocked = TRUE WHERE user_id = $1`, [user.id]);
+  const nextDueDate =
+    allDuesQuery.rows[0]?.next_due_date || null;
 
-    // Return the 403 error. Both variables now exist and can be used safely.
+  const firstOverdueDueDate =
+    overdueQuery.rows[0]?.first_overdue_due_date || null;
+
+  const dueRideIds =
+    allDuesQuery.rows[0]?.ride_ids || [];
+
+  const blockedByAmount = totalUnsettled > CASH_DUE_BLOCK_LIMIT;
+  const blockedByDueDate = overdueDue > 0;
+
+  // 3. Block if total dues > 1200 OR due date is over
+  if (blockedByAmount || blockedByDueDate) {
+    console.log(
+      `[BLOCKED] Driver ${user.id} - Total: ${totalUnsettled}, Overdue: ${overdueDue}, AmountBlock: ${blockedByAmount}, DateBlock: ${blockedByDueDate}`
+    );
+
+    await pool.query(
+      `UPDATE drivers SET is_blocked = TRUE WHERE user_id = $1`,
+      [user.id]
+    );
+
     return res.status(403).json({
       message: 'Account blocked due to unsettled cash dues.',
       verificationStatus: 'blocked_due_to_dues',
-      totalDuePaise: totalDuePaise,          // The overdue amount (for records)
-      upcomingDuePaise: totalUnsettledPaise, // ✅ The GRAND TOTAL amount (for the popup)
-      dueRideIds: dueRideIds,
       userId: user.id,
+
+      upcomingDuePaise: totalUnsettled,
+      totalDuePaise: overdueDue,
+      dueRideIds,
+
+      blockedByAmount,
+      blockedByDueDate,
+      cashDueLimit: CASH_DUE_BLOCK_LIMIT,
+      nextDueDate,
+      firstOverdueDueDate,
     });
   }
 
-  // --- 3. IF NOT BLOCKED ---
-  // Attach the grand total to the successful response for the reminder popup.
-  req.upcomingDuePaise = totalUnsettledPaise;
+  // 4. Not blocked, but send reminder amount in success response
+  req.upcomingDuePaise = totalUnsettled;
   req.nextDueDate = nextDueDate;
 }
 
@@ -525,22 +413,68 @@ if (user.role === 'driver') {
       process.env.JWT_SECRET,
       { expiresIn: '7d' }
     );
+	
+ const refRow = await pool.query(
+      `SELECT referral_code FROM referrals WHERE user_id = $1 LIMIT 1`,
+      [user.id]
+    );
+    let driverReferralCode = refRow.rows[0]?.referral_code || null;
+
+    // Old drivers logic
+    if (!driverReferralCode && user.role === 'driver') {
+      const userData = await pool.query("SELECT name, phone_number FROM users WHERE id = $1", [user.id]);
+      const { name, phone_number } = userData.rows[0];
+      
+      // Safety check for helper function
+      driverReferralCode = generateSafeCode(name, phone_number, user.id);
+      
+      await pool.query(
+        `INSERT INTO referrals (user_id, user_role, referral_code, first_ride_free_used) 
+         VALUES ($1, 'driver', $2, TRUE) ON CONFLICT (user_id) DO NOTHING`,
+        [user.id, driverReferralCode]
+      );
+    }
+
 
     // 6️⃣ Success response
 const successPayload = {
   token,
   userId: user.id,
   role: user.role,
+  referralCode: driverReferralCode, 
   verificationStatus:
     user.role === 'driver'
-      ? user.driver_verification_status || 'pending_verification'
+      ? user.verification_status || 'pending_verification'
       : 'n/a',
+	  vehicleType: user.vehicle_type || null,
 };
-
+if (user.role === 'driver') {
+  successPayload.termsAccepted = user.terms_accepted === true;
+}
 if (user.role === 'driver') {
   // If we set these above, attach them; otherwise default to 0/null
    successPayload.upcomingDuePaise = req.upcomingDuePaise ?? 0;
   successPayload.nextDueDate = req.nextDueDate ?? null;
+}
+
+//Passenger
+// Login success payload mein — passenger ke liye add karo (line ~758 ke baad):
+if (user.role === 'passenger') {
+  const passRefRow = await pool.query(
+    `SELECT first_ride_free_used, first_ride_free_expires_at, referred_by_user_id
+     FROM referrals WHERE user_id = $1 LIMIT 1`,
+    [user.id]
+  );
+  const passRef = passRefRow.rows[0];
+  if (passRef && !passRef.first_ride_free_used && passRef.referred_by_user_id) {
+    const expired = passRef.first_ride_free_expires_at 
+      ? new Date() > new Date(passRef.first_ride_free_expires_at) 
+      : false;
+    successPayload.firstRideFree = !expired;
+    successPayload.firstRideFreeExpiresAt = passRef.first_ride_free_expires_at;
+  } else {
+    successPayload.firstRideFree = false;
+  }
 }
 
 res.status(200).json(successPayload);
@@ -574,10 +508,112 @@ const verifyEmail = async (req, res) => {
 };
 
 
+// ── Lock free ride on request send (called from ride request API) ────────────
+const lockFirstRideFree = async (req, res) => {
+  const { passengerId, rideId } = req.body;
+  if (!passengerId || !rideId) return res.status(400).json({ error: 'Missing fields' });
+
+  try {
+    // Already used?
+    const check = await pool.query(
+      `SELECT first_ride_free_used, first_ride_free_expires_at
+       FROM referrals WHERE user_id = $1`,
+      [passengerId]
+    );
+    const row = check.rows[0];
+    if (!row) return res.json({ eligible: false, reason: 'no_referral' });
+    if (row.first_ride_free_used) return res.json({ eligible: false, reason: 'already_used' });
+    if (row.first_ride_free_expires_at && new Date() > new Date(row.first_ride_free_expires_at)) {
+      return res.json({ eligible: false, reason: 'expired' });
+    }
+
+    // Lock it — set ride_id and locked_at
+    await pool.query(
+      `UPDATE referrals
+       SET first_ride_free_locked_at = NOW(),
+           first_ride_free_ride_id   = $1
+       WHERE user_id = $2
+         AND first_ride_free_used = FALSE`,
+      [rideId, passengerId]
+    );
+
+    return res.json({ eligible: true });
+  } catch (e) {
+    console.error('lockFirstRideFree error:', e.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+// ── Called when passenger cancels — expire free ride offer ───────────────────
+const cancelAbuseFreeRide = async (req, res) => {
+  const { passengerId } = req.body;
+  if (!passengerId) return res.status(400).json({ error: 'Missing passengerId' });
+
+  try {
+    const result = await pool.query(
+      `UPDATE referrals
+       SET first_ride_free_used = TRUE,
+           first_ride_free_ride_id = COALESCE(first_ride_free_ride_id, 'cancelled')
+       WHERE user_id = $1
+         AND first_ride_free_used = FALSE
+         AND first_ride_free_locked_at IS NOT NULL
+       RETURNING id`,
+      [passengerId]
+    );
+
+    if (result.rows.length > 0) {
+      console.warn(`⚠️ Free ride offer expired for passenger ${passengerId} due to cancel after lock`);
+      return res.json({ terminated: true, message: 'Free ride offer expired due to cancellation.' });
+    }
+    return res.json({ terminated: false });
+  } catch (e) {
+    console.error('cancelAbuseFreeRide error:', e.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+// ── Give referrer bonus after first ride completes ───────────────────────────
+const giveReferrerBonus = async (pool, passengerId, rideId) => {
+  try {
+    // Get referral row
+    const refRes = await pool.query(
+      `SELECT referred_by_user_id, referred_by_role,
+              referrer_benefit_given, referrer_benefit_amount
+       FROM referrals
+       WHERE user_id = $1 AND first_ride_free_ride_id = $2`,
+      [passengerId, rideId]
+    );
+    const ref = refRes.rows[0];
+    if (!ref || ref.referrer_benefit_given || !ref.referred_by_user_id) return;
+
+    // Credit ₹50 to referrer's wallet
+    await pool.query(
+      `INSERT INTO wallet_ledger (
+         driver_id, ride_external_id, type, direction, amount_paise, note
+       ) VALUES ($1, $2, 'REFERRAL_BONUS', 'CR', $3, 'Referral bonus — new passenger joined')
+       ON CONFLICT DO NOTHING`,
+      [ref.referred_by_user_id, rideId, ref.referrer_benefit_amount]
+    );
+
+    // Mark bonus as given
+    await pool.query(
+      `UPDATE referrals SET referrer_benefit_given = TRUE WHERE user_id = $1`,
+      [passengerId]
+    );
+
+    console.log(`✅ Referral bonus ₹${ref.referrer_benefit_amount} credited to user ${ref.referred_by_user_id}`);
+  } catch (e) {
+    console.error('giveReferrerBonus error:', e.message);
+  }
+};
+
 // Final CommonJS Export
 module.exports = {
     register,
     login,
-    verifyEmail, // Export the new verification handler
+    verifyEmail,
+    lockFirstRideFree,
+    cancelAbuseFreeRide,
+    giveReferrerBonus,  // used in socket.js completeRide
 };
 

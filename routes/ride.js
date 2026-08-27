@@ -1,384 +1,3 @@
-// // routes/ride.js
-// const express = require('express');
-// const router = express.Router();
-
-// const {
-  // computeGstPaise,
-  // isGstApplicable,
-  // roundedRupeesFromPaise
-// } = require('../utils/tax');
-
-// // === Base fare calculator (keep in sync with your client estimates) ===
-// function computeBaseFareINR(vehicleType, distanceKm) {
-  // const vt = String(vehicleType || '').toUpperCase();
-
-  // // Mirrors your MapScreen defaults (AUTO removed per your current file)
-  // const base =
-    // vt === 'BIKE'  ? 20 :
-    // vt === 'MINI'  ? 40 :
-    // // vt === 'AUTO'  ? 30 :
-    // vt === 'SEDAN' ? 70 :
-    // vt === 'SUV'   ? 100 : 40;
-
-  // const perKm =
-    // vt === 'BIKE'  ? 6  :
-    // vt === 'MINI'  ? 10 :
-    // // vt === 'AUTO'  ? 8  :
-    // vt === 'SEDAN' ? 15 :
-    // vt === 'SUV'   ? 20 : 10;
-
-  // const km = Math.max(0, Number(distanceKm) || 0);
-  // // round to 2 decimals (INR)
-  // return Math.round((base + perKm * km) * 100) / 100;
-// }
-
-// /**
- // * QUOTE ENDPOINT
- // * Mounted at /api/quote in server.js, so handler must be GET '/' here.
- // * Example: GET /api/quote?vehicleType=MINI&distanceKm=10.25
- // * Returns rupees & final_amount (.50 rule) that your app displays.
- // */
-// router.get('/', async (req, res) => {
-  // try {
-    // const vehicleType = String(req.query.vehicleType || '').toUpperCase();
-    // const distanceKm = Number(req.query.distanceKm || 0);
-
-    // const baseInr = computeBaseFareINR(vehicleType, distanceKm);
-    // const basePaise = Math.round(baseInr * 100);
-
-    // const { cgst, sgst } = computeGstPaise(basePaise, vehicleType);
-    // const totalPaise = basePaise + cgst + sgst;
-
-    // // Convert to rupees for display
-    // const baseRupees  = basePaise  / 100;
-    // const cgstRupees  = cgst       / 100;
-    // const sgstRupees  = sgst       / 100;
-    // const totalRupees = totalPaise / 100;
-
-    // // .50 rule for final whole rupees
-    // const roundToNearestHalf = (value) => {
-      // const intPart = Math.floor(value);
-      // const decimal = value - intPart;
-      // if (decimal < 0.5)  return intPart;       // below .50 -> down
-      // if (decimal === 0.5) return intPart + 0.5; // exactly .50 -> keep .50
-      // return intPart + 1;                       // above .50 -> up
-    // };
-    // const roundedTotalRupees = roundToNearestHalf(totalRupees);
-
-    // return res.json({
-      // vehicle_type: vehicleType,
-      // base_rupees:  baseRupees.toFixed(2),
-      // cgst_rupees:  cgstRupees.toFixed(2),
-      // sgst_rupees:  sgstRupees.toFixed(2),
-      // total_rupees: totalRupees.toFixed(2),
-      // final_amount: roundedTotalRupees, // whole amount per .50 rule
-      // gst_rate_percent: isGstApplicable(vehicleType) ? 5 : 0,
-    // });
-  // } catch (e) {
-    // console.error('quote route error:', e);
-    // return res.status(500).json({ ok: false, message: 'Server error' });
-  // }
-// });
-
-// /**
- // * RIDE REQUEST (consistent with /api/quote)
- // * POST /api/ride/request
- // */
-// router.post('/request', async (req, res) => {
-  // try {
-    // const io = global.io;
-    // const pool = global.pool;
-
-    // if (!pool) {
-      // return res.status(500).json({ success: false, message: 'DB not available' });
-    // }
-
-    // let { passengerId, pickup, destination, vehicleType, distanceKm } = req.body;
-    // if (!passengerId || !pickup || !destination || !vehicleType) {
-      // return res.status(400).json({ success: false, message: 'Missing required fields' });
-    // }
-
-    // vehicleType = String(vehicleType).toUpperCase();
-    // const externalId = `ride_${Date.now()}`;
-    // const otp = Math.floor(1000 + Math.random() * 9000).toString();
-    // const etaMinutes = Math.floor(Math.random() * 10) + 5;
-    // const km = Math.max(0, Number(distanceKm) || 0);
-
-    // // Pricing (mirror /api/quote)
-    // const baseInr = computeBaseFareINR(vehicleType, km); // e.g., 142.50
-    // const basePaise = Math.round(baseInr * 100);
-    // const { cgst, sgst } = computeGstPaise(basePaise, vehicleType);
-    // const totalPaise = basePaise + cgst + sgst;
-    // const finalAmountRupees = roundedRupeesFromPaise(totalPaise); // whole rupees (.50 rule)
-
-    // // Persist to rides (store precise paise total)
-    // await pool.query(
-      // `INSERT INTO rides
-         // (external_id, passenger_id, pickup_address, dropoff_address, vehicle_type,
-          // estimated_fare_paise, distance_km, otp, eta_minutes)
-       // VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      // [
-        // externalId,
-        // passengerId,
-        // pickup,
-        // destination,
-        // vehicleType,
-        // totalPaise,
-        // km,
-        // otp,
-        // etaMinutes
-      // ]
-    // );
-
-    // // Emit to drivers room (drivers:<VEHICLETYPE>)
-    // io.to(`drivers:${vehicleType}`).emit('newRideRequest', {
-      // externalId,
-      // passengerId,
-      // pickup,
-      // destination,
-      // vehicleType,
-      // etaMinutes,
-      // otp,
-      // pricing: {
-        // gst_rate_percent: isGstApplicable(vehicleType) ? 5 : 0,
-
-        // // rupees (UI-friendly)
-        // base_rupees:  (basePaise / 100).toFixed(2),
-        // cgst_rupees:  (cgst / 100).toFixed(2),
-        // sgst_rupees:  (sgst / 100).toFixed(2),
-        // total_rupees: (totalPaise / 100).toFixed(2),
-        // final_amount: finalAmountRupees, // INT rupees after .50-up rule
-
-        // // paise (precision/legacy)
-        // base_paise: basePaise,
-        // cgst_paise: cgst,
-        // sgst_paise: sgst,
-        // total_paise: totalPaise,
-      // }
-    // });
-
-    // return res.json({
-      // success: true,
-      // externalId,
-      // otp,
-      // etaMinutes,
-      // vehicleType,
-      // fare: {
-        // final_amount: finalAmountRupees,
-        // total_rupees: (totalPaise / 100).toFixed(2),
-        // gst_rate_percent: isGstApplicable(vehicleType) ? 5 : 0
-      // }
-    // });
-  // } catch (e) {
-    // console.error('ride request error:', e);
-    // return res.status(500).json({ success: false, message: 'Server error' });
-  // }
-// });
-
-// /**
- // * COMPLETE RIDE + CREATE INVOICE
- // * POST /api/ride/complete
- // * Body: { rideId: "<external_id>" }
- // */
- // function roundHalfUpToInt(value) {
-  // const floor = Math.floor(value);
-  // return (value - floor) >= 0.5 ? floor + 1 : floor;
-// }
- 
-// router.post('/complete', async (req, res) => {
-  // const pool = global.pool;
-  // if (!pool) return res.status(500).json({ error: 'DB not available' });
-
-  // const { rideId } = req.body;
-  // if (!rideId) return res.status(400).json({ error: 'rideId_required' });
-
-  // const client = await pool.connect();
-  // try {
-    // await client.query('BEGIN');
-
-    // // 1) Mark ride as completed
-    // const rideRes = await client.query(
-      // `UPDATE rides
-         // SET status = 'COMPLETED',
-             // completed_at = NOW()
-       // WHERE external_id = $1
-       // RETURNING external_id, passenger_id, driver_id, vehicle_type,
-                 // pickup_address, dropoff_address, requested_at, completed_at, distance_km`,
-      // [rideId]
-    // );
-    // const ride = rideRes.rows[0];
-    // if (!ride) {
-      // await client.query('ROLLBACK');
-      // return res.status(404).json({ error: 'ride_not_found' });
-    // }
-
-    // // 2️⃣ Calculate base and GST (rupees, not paise)
-    // const baseInr = computeBaseFareINR(ride.vehicle_type, ride.distance_km || 0); // 853.70
-    // const baseRoundedR = roundHalfUpToInt(baseInr);                                // 854
-
-    // // Calculate GST on the original base
-    // const basePaiseExact = Math.round(baseInr * 100);
-    // const { cgst, sgst } = computeGstPaise(basePaiseExact, ride.vehicle_type);
-
-    // // Convert GST to rupees and round
-    // const cgstRoundedR = roundHalfUpToInt(cgst / 100); // e.g. 21.34 → 21
-    // const sgstRoundedR = roundHalfUpToInt(sgst / 100); // e.g. 21.34 → 21
-
-    // const totalRoundedR = baseRoundedR + cgstRoundedR + sgstRoundedR; // 896
-
-    // // ✅ Save **whole rupees directly** (no ×100)
-    // const baseRoundedRupees  = baseRoundedR;
-    // const cgstRoundedRupees  = cgstRoundedR;
-    // const sgstRoundedRupees  = sgstRoundedR;
-    // const totalRoundedRupees = totalRoundedR;
-
-    // // 3️⃣ Insert invoice with whole rupee values
-    // const insertRes = await client.query(
-      // `INSERT INTO ride_invoices (
-          // ride_external_id, invoice_number, passenger_id, driver_id,
-          // vehicle_type, pickup_address, dropoff_address,
-          // ride_started_at, ride_completed_at,
-          // base_amount_paise, cgst_paise, sgst_paise, total_paise, rounded_rupees
-        // )
-        // VALUES (
-          // $1, NULL, $2, $3,
-          // $4, $5, $6,
-          // $7, $8,
-          // $9, $10, $11, $12, $13
-        // )
-        // ON CONFLICT (ride_external_id) DO NOTHING
-        // RETURNING id`,
-      // [
-        // ride.external_id,
-        // ride.passenger_id,
-        // ride.driver_id,
-        // ride.vehicle_type,
-        // ride.pickup_address,
-        // ride.dropoff_address,
-        // ride.requested_at,
-        // ride.completed_at,
-        // baseRoundedRupees,   // ✅ store rupees directly
-        // cgstRoundedRupees,   // ✅ store rupees directly
-        // sgstRoundedRupees,   // ✅ store rupees directly
-        // totalRoundedRupees,  // ✅ store rupees directly
-        // totalRoundedRupees
-      // ]
-    // );
-
-    // if (insertRes.rowCount === 0) {
-      // await client.query('COMMIT');
-      // return res.json({ ok: true, message: 'Ride completed; invoice already existed.' });
-    // }
-
-    // const newId = insertRes.rows[0].id;
-    // const year = new Date().getFullYear();
-    // const padded = String(newId).padStart(6, '0');
-    // const invoiceNumber = `INV-${year}-${padded}`;
-
-    // await client.query(
-      // `UPDATE ride_invoices SET invoice_number = $1 WHERE id = $2`,
-      // [invoiceNumber, newId]
-    // );
-
-    // await client.query('COMMIT');
-
-    // return res.json({
-      // ok: true,
-      // invoice_number: invoiceNumber,
-      // amounts: {
-        // base_rupees: baseRoundedRupees,
-        // cgst_rupees: cgstRoundedRupees,
-        // sgst_rupees: sgstRoundedRupees,
-        // total_rupees: totalRoundedRupees
-      // }
-    // });
-  // } catch (e) {
-    // await client.query('ROLLBACK');
-    // console.error('complete route error:', e);
-    // return res.status(500).json({ error: 'server_error' });
-  // } finally {
-    // client.release();
-  // }
-// });
-
-// /**
- // * CANCEL RIDE
- // * POST /api/ride/cancel
- // */
-// router.post('/cancel', async (req, res) => {
-  // try {
-    // const { rideId } = req.body;
-    // const io = global.io;
-    // const pool = global.pool;
-
-    // if (!rideId) return res.status(400).json({ error: 'rideId_required' });
-
-    // const result = await pool.query(
-      // `UPDATE rides
-         // SET status = 'CANCELLED', completed_at = NOW()
-       // WHERE external_id = $1
-       // RETURNING driver_id, vehicle_type`,
-      // [rideId]
-    // );
-
-    // const driverId = result.rows[0]?.driver_id;
-    // const vehicleType = result.rows[0]?.vehicle_type;
-
-    // if (driverId) {
-      // const dSock = global.activeDrivers?.[String(driverId)]?.socketId || null;
-      // if (dSock) global.io.to(dSock).emit('rideCancelled', { rideId });
-    // } else if (vehicleType) {
-      // global.io.to(`drivers:${vehicleType}`).emit('rideRemoved', { rideId });
-    // }
-
-    // return res.json({ ok: true });
-  // } catch (e) {
-    // console.error('cancel route error:', e);
-    // return res.status(500).json({ ok: false, message: 'Server error' });
-  // }
-// });
-
-// /**
- // * PASSENGER RATING
- // * POST /api/ride/rating
- // */
-// router.post('/rating', async (req, res) => {
-  // try {
-    // const { rideId, rating } = req.body;
-    // const pool = global.pool;
-
-    // if (!rideId || !rating) return res.status(400).json({ error: 'rideId_and_rating_required' });
-
-    // const result = await pool.query(
-      // `UPDATE rides
-         // SET passenger_rating = $1, updated_at = NOW()
-       // WHERE external_id = $2
-       // RETURNING driver_id`,
-      // [Number(rating), rideId]
-    // );
-
-    // const driverId = result.rows[0]?.driver_id;
-
-    // try {
-      // const dSock = global.activeDrivers?.[String(driverId)]?.socketId || null;
-      // if (dSock) global.io.to(dSock).emit('ratingReceived', { rideId, rating: Number(rating) });
-    // } catch (e) {
-      // console.warn('[rating] socket notify failed:', e?.message || e);
-    // }
-
-    // return res.json({ ok: true });
-  // } catch (e) {
-    // console.error('rating route error:', e);
-    // return res.status(500).json({ ok: false, message: 'Server error' });
-  // }
-// });
-
-// module.exports = router;
-
-
-
-
-
 // routes/ride.js
 const express = require('express');
 const router = express.Router();
@@ -386,88 +5,10 @@ const router = express.Router();
 const {
   computeGstPaise,
   isGstApplicable,
-  roundedRupeesFromPaise
+  roundedRupeesFromPaise,
+  computeBaseFareINR
 } = require('../utils/tax');
 
-// === Base fare calculator (keep in sync with your client estimates) ===
-function computeBaseFareINR(vehicleType, distanceKm) {
-  const vt = String(vehicleType || '').toUpperCase();
-
-  // Mirrors your MapScreen defaults (AUTO removed per your current file)
-  const base =
-    vt === 'BIKE'  ? 20 :
-    vt === 'MINI'  ? 40 :
-    // vt === 'AUTO'  ? 30 :
-    vt === 'SEDAN' ? 70 :
-    vt === 'SUV'   ? 100 : 40;
-
-  const perKm =
-    vt === 'BIKE'  ? 6  :
-    vt === 'MINI'  ? 10 :
-    // vt === 'AUTO'  ? 8  :
-    vt === 'SEDAN' ? 15 :
-    vt === 'SUV'   ? 20 : 10;
-
-  const km = Math.max(0, Number(distanceKm) || 0);
-  // round to 2 decimals (INR)
-  return Math.round((base + perKm * km) * 100) / 100;
-}
-
-/**
- * QUOTE ENDPOINT
- * Mounted at /api/quote in server.js, so handler must be GET '/' here.
- * Example: GET /api/quote?vehicleType=MINI&distanceKm=10.25
- * Returns rupees & final_amount (.50 rule) that your app displays.
- */
-// router.get('/', async (req, res) => {
-  // try {
-    // const vehicleType = String(req.query.vehicleType || '').toUpperCase();
-    // const distanceKm = Number(req.query.distanceKm || 0);
-
-    // const baseInr = computeBaseFareINR(vehicleType, distanceKm);
-    // const basePaise = Math.round(baseInr * 100);
-
-    // const { cgst, sgst } = computeGstPaise(basePaise, vehicleType);
-    // const totalPaise = basePaise + cgst + sgst;
-
-    // // Convert to rupees for display
-    // const baseRupees  = basePaise  / 100;
-    // const cgstRupees  = cgst       / 100;
-    // const sgstRupees  = sgst       / 100;
-    // const totalRupees = totalPaise / 100;
-
-    // // .50 rule for final whole rupees
-    // const roundToNearestHalf = (value) => {
-      // const intPart = Math.floor(value);
-      // const decimal = value - intPart;
-      // if (decimal < 0.5)  return intPart;       // below .50 -> down
-      // if (decimal === 0.5) return intPart + 0.5; // exactly .50 -> keep .50
-      // return intPart + 1;                       // above .50 -> up
-    // };
-    // const roundedTotalRupees = roundToNearestHalf(totalRupees);
-
-    // return res.json({
-      // vehicle_type: vehicleType,
-      // base_rupees:  baseRupees.toFixed(2),
-      // cgst_rupees:  cgstRupees.toFixed(2),
-      // sgst_rupees:  sgstRupees.toFixed(2),
-      // total_rupees: totalRupees.toFixed(2),
-      // final_amount: roundedTotalRupees, // whole amount per .50 rule
-      // gst_rate_percent: isGstApplicable(vehicleType) ? 5 : 0,
-    // });
-  // } catch (e) {
-    // console.error('quote route error:', e);
-    // return res.status(500).json({ ok: false, message: 'Server error' });
-  // }
-// });
-
-// ✅ =final, and surge-aware version in its place. et('/') endpoint.
-// In ride.js
-// ❌ DELETE the flawed router.get('/') endpoint I gave you.
-// ✅ PASTE this new, correct version that restores your GST logic.
-// In your ride.js file
-// ❌ DELETE the flawed router.get('/') I gave you previously.
-// ✅ PASTE this new, correct version that restores your GST logic.
 
 router.get('/', async (req, res) => {
   const pool = global.pool;
@@ -540,7 +81,7 @@ router.get('/', async (req, res) => {
     // --- 3. RETURN THE FULL, DETAILED RESPONSE (like your original) ---
     return res.json({
       vehicle_type: vehicleType,
-      base_rupees:  baseInr.toFixed(2), // Original base fare for transparency
+      base_rupees:  surgedBaseInr.toFixed(2), // Original base fare for transparency
       cgst_rupees:  (cgst / 100).toFixed(2),
       sgst_rupees:  (sgst / 100).toFixed(2),
       total_rupees: (totalPaise / 100).toFixed(2), // The precise total before final rounding
@@ -587,30 +128,46 @@ router.post('/request', async (req, res) => {
       const pickupPointGeog = `ST_SetSRID(ST_MakePoint(${longitude}, ${latitude}), 4326)::geography`;
       const surgeQueryText = `
         WITH last_15_min_pings AS (
-          SELECT id, ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geometry AS geom
-          FROM passenger_pings
-          WHERE created_at > NOW() - INTERVAL '15 minutes'
-        ),
-        clusters AS (
-          SELECT ST_ClusterDBSCAN(geom, eps := 500, minpoints := 5) OVER () AS cluster_id, geom
-          FROM last_15_min_pings
-        ),
-        surge_zones AS (
-          SELECT
-            cluster_id,
-            1.0 + (FLOOR((COUNT(*) - 5) / 5.0) * 0.1) AS surge_multiplier,
-            ST_ConvexHull(ST_Collect(geom)) AS zone
-          FROM clusters
-          WHERE cluster_id IS NOT NULL
-          GROUP BY cluster_id
-          HAVING COUNT(*) >= 5
-        )
-        SELECT surge_multiplier FROM surge_zones
-        WHERE ST_Intersects(zone, ST_Transform(${pickupPointGeog}::geometry, ST_SRID(zone)))
-        LIMIT 1;
+  SELECT
+    id,
+    location::geometry AS geom
+  FROM rider_demand_pings
+  WHERE ping_time > NOW() - INTERVAL '15 minutes'
+),
+clusters AS (
+  SELECT
+    ST_ClusterDBSCAN(geom, eps := 500, minpoints := 5) OVER () AS cluster_id,
+    geom
+  FROM last_15_min_pings
+),
+surge_zones AS (
+  SELECT
+    cluster_id,
+    1.0 + (FLOOR((COUNT(*) - 5) / 5.0) * 0.1) AS surge_multiplier,
+    ST_ConvexHull(ST_Collect(geom)) AS zone
+  FROM clusters
+  WHERE cluster_id IS NOT NULL
+  GROUP BY cluster_id
+  HAVING COUNT(*) >= 5
+)
+SELECT surge_multiplier
+FROM surge_zones
+WHERE ST_Intersects(
+  zone,
+  ST_Transform(
+    ST_SetSRID(ST_MakePoint($1, $2), 4326),
+    ST_SRID(zone)
+  )
+)
+LIMIT 1;
+
       `;
 
-      const surgeResult = await client.query(surgeQueryText);
+     const surgeResult = await client.query(
+  surgeQueryText,
+  [longitude, latitude]
+);
+
 
       let finalSurgeMultiplier = 1.0;
       if (surgeResult.rows.length > 0 && surgeResult.rows[0].surge_multiplier) {
@@ -640,8 +197,8 @@ router.post('/request', async (req, res) => {
       await client.query(
         `INSERT INTO rides
            (external_id, passenger_id, pickup_address, dropoff_address, vehicle_type,
-            estimated_fare_paise, distance_km, otp, eta_minutes, surge_multiplier) -- SURGE: Added column
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`, // SURGE: Added parameter
+            estimated_fare, distance_km, otp, eta_minutes, surge_multiplier,status) -- SURGE: Added column
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,'PENDING')`, // SURGE: Added parameter
         [
           externalId,
           passengerId,
@@ -703,16 +260,10 @@ router.post('/request', async (req, res) => {
 });
 
 
-/**
- * COMPLETE RIDE + CREATE INVOICE
- * POST /api/ride/complete
- * Body: { rideId: "<external_id>" }
- */
  function roundHalfUpToInt(value) {
  return Math.round(value);
 }
-// In routes/ride.js
-// ✅ REPLACE your entire router.post('/complete', ...) endpoint with this new version.
+
 router.post('/complete', async (req, res) => {
   const pool = global.pool;
   if (!pool) return res.status(500).json({ error: 'DB not available' });
@@ -725,13 +276,20 @@ router.post('/complete', async (req, res) => {
     await client.query('BEGIN');
 
     // 1. Fetch ride details
-    const rideRes = await client.query(
-      `UPDATE rides SET status = 'COMPLETED', completed_at = NOW()
-       WHERE external_id = $1
-       RETURNING external_id, passenger_id, driver_id, vehicle_type,
-                 pickup_address, dropoff_address, requested_at, completed_at, distance_km`,
-      [rideId]
-    );
+  await client.query(
+  `UPDATE rides SET status = 'COMPLETED', completed_at = NOW()
+   WHERE external_id = $1`,
+  [rideId]
+);
+const rideRes = await client.query(
+  `SELECT external_id, passenger_id, driver_id, vehicle_type,
+          pickup_address, dropoff_address, requested_at, completed_at,
+          distance_km, extra_amount, waiting_amount, estimated_fare
+   FROM rides
+   WHERE external_id = $1`,
+  [rideId]
+);
+
     const ride = rideRes.rows[0];
     if (!ride) {
       await client.query('ROLLBACK');
@@ -740,60 +298,101 @@ router.post('/complete', async (req, res) => {
 
     // --- ✅ START: THE FINAL, CORRECTED & SIMPLIFIED LOGIC ---
 
-    // 2. Calculate the precise base fare in INR (e.g., 3735.90)
-    const baseInr = computeBaseFareINR(ride.vehicle_type, ride.distance_km || 0);
+const lockedFare  = Number(ride.final_fare || ride.estimated_fare || 0);
+const waiting     = Number(ride.waiting_amount || 0);
+const extra       = Number(ride.extra_amount   || 0);
 
-    // 3. Calculate the precise total fare by adding GST *before* any rounding.
-    const gstRate = isGstApplicable(ride.vehicle_type) ? 0.05 : 0;
-    const totalInr = baseInr * (1 + gstRate); // e.g., 3735.90 * 1.05 = 3922.695
+const gstRate = isGstApplicable(ride.vehicle_type) ? 0.05 : 0;
 
-    // 4. Round the FINAL total ONCE. This is the official amount for everything.
-    const finalTotalRoundedR = roundHalfUpToInt(totalInr); // e.g., round(3922.695) = 3923. This is correct.
+// ✅ GST sirf base pe lagega (waiting/extra hatao)
+const taxableTotal = lockedFare - waiting - extra;
 
-    // 5. Update the main rides table with this definitive final fare.
+// ✅ exact base (NO ROUND)
+const baseExact = taxableTotal / (1 + gstRate);
+
+// ✅ GST exact
+const cgstExact = baseExact * 0.025;
+const sgstExact = baseExact * 0.025;
+
+// ✅ store decimals (IMPORTANT)
+const invoiceBaseR = Number(baseExact.toFixed(2));
+const invoiceCgstR = Number(cgstExact.toFixed(2));
+const invoiceSgstR = Number(sgstExact.toFixed(2));
+
+// ✅ FINAL TOTAL (sirf yaha round)
+const finalTotalRoundedR = Math.round(
+  invoiceBaseR + invoiceCgstR + invoiceSgstR + waiting + extra
+);  
+
+console.log('🔍 DEBUG /complete:', {
+  rideId: ride.external_id,
+  raw_waiting_amount: ride.waiting_amount,
+  parsed_waiting: waiting,
+  raw_extra_amount: ride.extra_amount,
+  parsed_extra: extra,
+  vehicle_type: ride.vehicle_type,
+  distance_km: ride.distance_km,
+  baseInr: baseInr,
+});
+
+// 3. GST applies ONLY on (base + extra), NOT on waiting
+// const gstRate        = isGstApplicable(ride.vehicle_type) ? 0.05 : 0;
+// const taxableAmount  = baseInr + extra;                          // GST base
+// const gstAmount      = taxableAmount * gstRate;                  // e.g. 500 * 0.05 = 25
+// const totalInr       = taxableAmount + gstAmount + waiting;      // ✅ waiting added flat after GST
+
+// 4. Round the FINAL total ONCE.
+//const finalTotalRoundedR = roundHalfUpToInt(totalInr);
+
+// 5. Update rides table with final fare.
+await client.query(
+  `UPDATE rides SET final_fare = $1, payment_mode = $2 WHERE external_id = $3`,
+  [finalTotalRoundedR, paidByCash ? 'CASH' : 'ONLINE', ride.external_id]
+);
+
+// 6. Build invoice components cleanly (no back-calculation needed now).
+//    GST is only on taxableAmount — this is clean and exact.
+// const invoiceCgstR   = roundHalfUpToInt((taxableAmount * (gstRate / 2)));  // CGST 2.5%
+// const invoiceSgstR   = roundHalfUpToInt((taxableAmount * (gstRate / 2)));  // SGST 2.5%
+// const invoiceBaseR   = roundHalfUpToInt(taxableAmount);                    // base+extra, pre-GST
+// const waitingRounded = roundHalfUpToInt(waiting);                          // waiting, no GST
+
+// 7. For CASH rides: commission is 3% of taxable base only. Waiting = 100% driver, no commission.
+if (paidByCash) {
+  const companyCommissionR = roundHalfUpToInt(invoiceBaseR * 0.03); // 3% of base+extra only
+
+  if (companyCommissionR > 0) {
     await client.query(
-      `UPDATE rides SET final_fare = $1 WHERE external_id = $2`,
-      [finalTotalRoundedR, ride.external_id]
+      `INSERT INTO wallet_ledger
+        (driver_id, ride_external_id, type, direction, amount_paise, note, is_settled, due_date)
+       VALUES ($1, $2, 'CASH_RECEIVED', 'DR', $3, $4, FALSE, NOW() + interval '7 day')`,
+      [ride.driver_id, ride.external_id, companyCommissionR,
+       `Commission 3% of base (excl. waiting) for cash ride ${ride.external_id}`]
     );
+  }
+}
 
-    // 6. For the invoice, work backward from the final rounded total.
-    //    This ensures all invoice components perfectly sum up to the final amount.
-    const invoiceBasePrecise = finalTotalRoundedR / (1 + gstRate);
-    const invoiceCgstR = roundHalfUpToInt(invoiceBasePrecise * (gstRate / 2));
-    const invoiceSgstR = roundHalfUpToInt(invoiceBasePrecise * (gstRate / 2));
-    // The invoice base is what's left. This guarantees accuracy for the invoice.
-    const invoiceBaseR = finalTotalRoundedR - invoiceCgstR - invoiceSgstR;
-
-    // 7. For CASH rides, calculate the commission driver owes on the INVOICE base amount.
-    if (paidByCash) {
-      const companyCommissionRate = 0.35; // 35%
-      // Using invoiceBaseR ensures the commission is based on what's shown on the invoice.
-      const amountDueInr = invoiceBaseR * companyCommissionRate;
-      const amountDueRoundedR = roundHalfUpToInt(amountDueInr); // e.g., round(invoiceBaseR * 0.35)
-
-      // This logic will now correctly round 899.50 to 900.
-      if (amountDueRoundedR > 0) {
-        await client.query(
-          `INSERT INTO wallet_ledger
-            (driver_id, ride_external_id, type, direction, amount_paise, note, is_settled, due_date)
-           VALUES ($1, $2, 'CASH_RECEIVED', 'DR', $3, $4, FALSE, NOW() + interval '7 day')`,
-          [ride.driver_id, ride.external_id, amountDueRoundedR, `Commission for cash ride ${ride.external_id}`]
-        );
-      }
-    }
-
-    // 8. Insert the balanced invoice details into the database.
-    const insertRes = await client.query(
-      `INSERT INTO ride_invoices (ride_external_id, passenger_id, driver_id, vehicle_type, base_amount_paise, cgst_paise, sgst_paise, total_paise, rounded_rupees, pickup_address, dropoff_address, ride_started_at, ride_completed_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-       ON CONFLICT (ride_external_id) DO NOTHING RETURNING id`,
-      [
-        ride.external_id, ride.passenger_id, ride.driver_id, ride.vehicle_type,
-        invoiceBaseR, invoiceCgstR, invoiceSgstR, finalTotalRoundedR, finalTotalRoundedR, // Use the balanced, correct values
-        ride.pickup_address, ride.dropoff_address, ride.requested_at, ride.completed_at
-      ]
-    );
-
+// 8. Insert invoice — now also saves waiting_amount separately.
+const insertRes = await client.query(
+  `INSERT INTO ride_invoices
+    (ride_external_id, passenger_id, driver_id, vehicle_type,
+     base_amount_paise, cgst_paise, sgst_paise, total_paise, rounded_rupees,
+     waiting_amount,
+     pickup_address, dropoff_address, ride_started_at, ride_completed_at)
+   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+   ON CONFLICT (ride_external_id) DO UPDATE SET
+     waiting_amount   = EXCLUDED.waiting_amount,
+     base_amount_paise= EXCLUDED.base_amount_paise,
+     total_paise      = EXCLUDED.total_paise,
+     rounded_rupees   = EXCLUDED.rounded_rupees
+     RETURNING id`,
+  [
+    ride.external_id, ride.passenger_id, ride.driver_id, ride.vehicle_type,
+    invoiceBaseR, invoiceCgstR, invoiceSgstR, finalTotalRoundedR, finalTotalRoundedR,
+    waitingRounded,
+    ride.pickup_address, ride.dropoff_address, ride.requested_at, ride.completed_at
+  ]
+);
 
     // Update invoice number logic (remains the same)
     if (insertRes.rowCount > 0) {
@@ -811,7 +410,7 @@ router.post('/complete', async (req, res) => {
     if(passengerSocket) {
       global.io.to(passengerSocket).emit('rideCompleted', { 
         rideId: ride.external_id, 
-        finalFare: totalRoundedR,
+        finalFare: finalTotalRoundedR,
         paidByCash: paidByCash 
       });
     }
@@ -820,7 +419,7 @@ router.post('/complete', async (req, res) => {
     if(driverSocket) {
       global.io.to(driverSocket).emit('rideCompleted', { 
         rideId: ride.external_id, 
-        finalFare: totalRoundedR,
+        finalFare: finalTotalRoundedR,
         paidByCash: paidByCash 
       });
     }
@@ -925,18 +524,14 @@ router.get('/active-status/:passengerId', async (req, res) => {
   const passengerId = req.params.passengerId;
 
   try {
-    // 🛑 CRITICAL FIX: Filter for ONLY TRULY ACTIVE STATUSES 🛑
-    // This query ensures 'SCHEDULED' rides are ignored.
-    const result = await pool.query(
-      `SELECT external_id, status, driver_id, pickup_address
-       FROM rides 
-       WHERE passenger_id = $1 
-         AND driver_id is not null -- <--- ADDED CONDITION
-         AND status IN ('PENDING', 'ACCEPTED', 'ARRIVED', 'IN_TRANSIT') 
-AND completed_at IS NULL
-  AND cancelled_at IS NULL
-       ORDER BY id DESC
-       LIMIT 1`,
+		const result = await pool.query(
+		`SELECT external_id, status, driver_id, pickup_address FROM rides WHERE passenger_id = $1 
+      AND driver_id is not null 
+      AND status IN ('PENDING', 'ACCEPTED', 'ARRIVED', 'IN_TRANSIT', 'DISPUTED')
+		  AND completed_at IS NULL
+		  AND cancelled_at IS NULL
+    ORDER BY id DESC
+    LIMIT 1`,
       [passengerId]
     );
 
@@ -958,6 +553,11 @@ AND completed_at IS NULL
   } catch (e) {
     console.error('active-status route error:', e);
     return res.status(500).json({ error: 'server_error' });
+	
+	
+	console.log(e.position);
+console.log(e.message);
+console.log(resultQuery);
   }
 });
 

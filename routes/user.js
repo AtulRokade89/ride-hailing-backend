@@ -5,38 +5,33 @@
 	const { sendNotificationToUser } = require('../services/notification_sender');
 
    router.post('/update-fcm-token', async (req, res) => {
-  const { userId, fcmToken } = req.body;
-
-  if (!userId || !fcmToken) {
-    return res.status(400).json({ message: 'userId and fcmToken are required.' });
-  }
-
   try {
-    // 🔥🔥🔥 THIS LINE IS THE MISSING PIECE 🔥🔥🔥
-    // Remove this token from ANY previous user
-    await global.pool.query(
-      `DELETE FROM fcm_tokens WHERE fcm_token = $1`,
-      [fcmToken]
-    );
+    const { userId, fcmToken } = req.body;
 
-    // ✅ Now safely upsert for current user
+    if (!userId || !fcmToken) {
+      return res.status(400).json({ message: 'Missing parameters' });
+    }
+
+    // Number conversion safety
+    const uid = parseInt(userId);
+
+    // Pehle purane tokens delete karein
+    await global.pool.query('DELETE FROM fcm_tokens WHERE fcm_token = $1', [fcmToken]);
+
+    // Naya token insert karein
     const query = `
       INSERT INTO fcm_tokens (user_id, fcm_token)
       VALUES ($1, $2)
       ON CONFLICT (user_id)
-      DO UPDATE SET
-        fcm_token = EXCLUDED.fcm_token,
-        updated_at = NOW();
+      DO UPDATE SET fcm_token = EXCLUDED.fcm_token, updated_at = NOW();
     `;
+    await global.pool.query(query, [uid, fcmToken]);
 
-    await global.pool.query(query, [userId, fcmToken]);
-
-    console.log(`✅ FCM token reassigned to user ${userId}`);
-    res.status(200).json({ message: 'FCM token updated successfully.' });
-
+    res.status(200).json({ message: 'Success' });
   } catch (error) {
-    console.error('Error upserting FCM token:', error);
-    res.status(500).json({ message: 'Internal Server Error' });
+    console.error('🔥 FCM ERROR:', error);
+    // 🚨 Response dena zaroori hai varna connection closed error aayega
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -54,13 +49,13 @@ router.post('/logout', async (req, res) => {
 
   try {
     // Delete the token from our glorious fcm_tokens table
-    await global.pool.query(
-      `DELETE FROM fcm_tokens WHERE user_id = $1`,
-      [userId]
-    );
+    // await global.pool.query(
+      // `DELETE FROM fcm_tokens WHERE user_id = $1`,
+      // [userId]
+    // );
 
     console.log(`✅ FCM Token deleted for user ${userId} upon logout.`);
-    res.status(200).json({ message: 'Logout successful and token removed.' });
+    res.status(200).json({ message: 'Logout successful' });
 
   } catch (error) {
     console.error('Error deleting FCM token during logout:', error);

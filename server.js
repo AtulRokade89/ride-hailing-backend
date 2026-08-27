@@ -1,14 +1,11 @@
-// server.js (Corrected)
+// server.js
 require('dotenv').config();
-
-
 
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
-const { Pool } = require('pg');
-const path = require('path');
 const admin = require('firebase-admin');
+const { Pool } = require('pg');
 
 const authRoutes = require('./routes/auth.js');
 const driverVerificationRoutes = require('./routes/driverVerification.js');
@@ -16,25 +13,51 @@ const rideRoutes = require('./routes/ride.js');
 const initSocketServer = require('./socket.js'); // returns io
 const paymentRoutes = require('./routes/payment');
 const walletRoutes = require('./routes/wallet');
-//const initializeCronJobs = require('./cron_jobs'); 
+const initializeCronJobs = require('./cron_jobs'); 
 const driverRoutes = require('./routes/driver.js');
 const duesRoutes = require('./routes/dues');
 const demand = require('./routes/demand');
 const scheduleRoutes = require('./routes/schedule.js');
 const adminWalletRoutes = require("./routes/adminWallet");
 const userRoutes = require('./routes/user.js'); 
-const pool = require('./db');
+const { getPassengerBadge } = require('./utils/ratingUtils'); 
+const adminDashboardRoutes = require('./routes/adminDashboard');
+const adminDriverVerificationRoutes = require('./routes/adminDriverVerification');
+const adsRoutes = require('./routes/ads.routes');
+const ticketRoutes = require('./routes/tickets.routes');
+const adminSupportRoutes = require('./routes/admin.support.routes');
+const adminNotificationRoutes = require('./routes/admin.notification.routes');
+const disputeRoutes = require('./routes/dispute.js');
+const tollRouter = require('./routes/toll');
+const {
+  apiLoggerMiddleware,
+  wrapPoolWithLogger,
+  healthHandler,
+} = require('./services/logger');
 
 
+if (
+  process.env.NODE_ENV === 'production' &&
+  process.env.APP_ENV !== 'PRODUCTION'
+) {
+  console.error('❌ Non-production app cannot run with NODE_ENV=production');
+  process.exit(1);
+}
 
 
-
+console.log(
+  '🧪 SAFETY_TEST_MODE =',
+  process.env.SAFETY_TEST_MODE
+);
 
 // --- DB Pool ---
-// const pool = new Pool({
-  // connectionString: process.env.DATABASE_URL,
-  // ssl: { rejectUnauthorized: false },
-// });
+const pool = wrapPoolWithLogger(new Pool({
+  user:     process.env.DB_USER,
+  host:     process.env.DB_HOST,
+  database: process.env.DB_NAME,
+  password: process.env.DB_PASSWORD,
+  port:     process.env.DB_PORT,
+}));
 
 // Expose for routes that need them at runtime (MOVED THIS BLOCK UP)
 global.pool = pool; // <--- Set global.pool BEFORE mounting routes
@@ -42,24 +65,15 @@ global.pool = pool; // <--- Set global.pool BEFORE mounting routes
 
 // --- Express app ---
 const app = express();
-app.use(cors());
-app.use(express.json());
-
 app.set('trust proxy', true);
 
-
-
+const path = require('path');
+const serviceAccount = require(path.join(__dirname, 'firebase-service-account-key.json'));
 admin.initializeApp({
-  credential: admin.credential.cert({
-    projectId: process.env.FIREBASE_PROJECT_ID,
-    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-    privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-  }),
+  credential: admin.credential.cert(serviceAccount)
 });
 
-console.log('✅ Firebase Admin initialized via ENV');
-
-console.log('✅ Firebase Admin initialized via ENV');
+console.log('✅ Firebase Admin SDK initialized successfully!');
 
 app.use(
   '/uploads',
@@ -73,11 +87,35 @@ app.use((req, res, next) => {
 });
 
 
-
+app.use(cors());
+app.use(express.json());
+require('./scheduledNotification.job');
 
 // Simple check
 app.get('/', (_req, res) => res.send('Ride Hailing Backend is running!'));
-app.use((req, _res, next) => { console.log(req.method, req.url); next(); });
+//app.use((req, _res, next) => { console.log(req.method, req.url); next(); });
+
+// app.use((req, res, next) => {
+  // const start = Date.now();
+
+  // res.on('finish', () => {
+    // const duration = Date.now() - start;
+
+    // console.log(
+      // `[API] ${req.method} ${req.originalUrl} | ${res.statusCode} | ${duration}ms`
+    // );
+
+    // if (duration > 1000) {
+      // console.warn(
+        // `[SLOW API] ${req.method} ${req.originalUrl} took ${duration}ms`
+      // );
+    // }
+  // });
+
+  // next();
+// });
+
+app.use(apiLoggerMiddleware);
 
 // Mount routes
 app.use('/api/auth', authRoutes);
@@ -92,21 +130,52 @@ app.use('/api/dues', duesRoutes);
 app.use('/api/demand', demand);
 app.use('/api/schedule', scheduleRoutes);
 app.use('/api/admin', require('./routes/adminDrivers'));
-app.use("/api/admin", adminWalletRoutes);
+app.use('/api/admin', adminWalletRoutes);
 app.use('/api/user', userRoutes); 
-
+app.use('/api/admin', adminDashboardRoutes);
+app.use('/api/admin', adminDriverVerificationRoutes);
+app.use('/api/ads', adsRoutes);
+app.use('/api/tickets', ticketRoutes);
+app.use('/api/admin/support', require('./routes/admin.support.routes'));
+app.use('/api/admin', require('./routes/admin.rides.routes'));
+app.use('/api/admin', adminNotificationRoutes);
+app.use('/api/admin', require('./routes/admin.payments.routes'));
+app.use('/api/admin/driver-settlements', require('./Routes/driverSettlement.routes'));
+app.use('/api/quote', require('./routes/quote'));
+app.use('/api/dispute', disputeRoutes);
+app.use('/api/toll', tollRouter);
+app.use('/api/admin/monitoring', require('./routes/monitoring'));
 
 // CORRECT:
 //require('./cron_jobs');
 const { isGstApplicable, roundedRupeesFromPaise } = require('./utils/tax'); // This import is correct
 
-function computeBaseFareINR(vehicleType, distanceKm) {
-  const vt = String(vehicleType || '').toUpperCase();
-  const base = vt === 'BIKE' ? 20 : vt === 'MINI' ? 40 : vt === 'SEDAN' ? 70 : vt === 'SUV' ? 100 : 40;
-  const perKm = vt === 'BIKE' ? 6 : vt === 'MINI' ? 10 : vt === 'SEDAN' ? 15 : vt === 'SUV' ? 20 : 10;
-  const km = Math.max(0, Number(distanceKm) || 0);
-  return Math.round((base + perKm * km) * 100) / 100;
-}
+// function computeBaseFareINR(vehicleType, distanceKm) {
+  // const vt = String(vehicleType || '').toUpperCase();
+  // const base = vt === 'BIKE' ? 20 : vt === 'MINI' ? 40 : vt === 'SEDAN' ? 70 : vt === 'SUV' ? 100 : 40;
+  // const perKm = vt === 'BIKE' ? 6 : vt === 'MINI' ? 10 : vt === 'SEDAN' ? 15 : vt === 'SUV' ? 20 : 10;
+  // const km = Math.max(0, Number(distanceKm) || 0);
+  // return Math.round((base + perKm * km) * 100) / 100;
+// }
+
+
+// TEMP DEBUG — server.js mein add karo
+app.get('/debug-fcm', async (req, res) => {
+  const pool = global.pool;
+  try {
+    const tables = await pool.query(`
+      SELECT table_name FROM information_schema.tables 
+      WHERE table_schema = 'public' AND table_name ILIKE '%fcm%'
+    `);
+    const cols = await pool.query(`
+      SELECT column_name FROM information_schema.columns 
+      WHERE table_name = 'fcm_tokens'
+    `);
+    res.json({ tables: tables.rows, columns: cols.rows });
+  } catch(e) {
+    res.json({ error: e.message });
+  }
+});
 
 app.get('/api/quote', async (req, res) => {
   try {
@@ -189,7 +258,9 @@ const server = http.createServer(app);
 const io = initSocketServer(server, pool);  // initialise ONCE
 
 global.io = io; // <--- global.io set here
-//initializeCronJobs(pool, io);
+global.activeDrivers    = initSocketServer.getActiveDrivers();
+global.activePassengers = initSocketServer.getActivePassengers();
+initializeCronJobs(pool, io);
 
 
 
@@ -214,120 +285,175 @@ function getWeekBounds(date) {
 
 app.get('/api/drivers/:driverId/weekly-summary', async (req, res) => {
   const { driverId } = req.params;
-  if (!driverId) {
-    return res.status(400).json({ message: 'Driver ID is required' });
-  }
-
   try {
     const { startOfWeek, endOfWeek } = getWeekBounds();
 
-    // --- 1. Get Current Week's Data ---
+    // 1. Existing Summary Logic (Totals)
     const currentWeekQuery = `
-      SELECT
-        type,
-        SUM(amount_paise) AS total_paise
+      SELECT type, SUM(amount_paise) AS total_paise
       FROM wallet_ledger
-      WHERE driver_id = $1
-        AND created_at >= $2
-        AND created_at <= $3
-        AND (type = 'CREDIT_ONLINE' OR type = 'CASH_RECEIVED')
+      WHERE driver_id = $1 AND created_at >= $2 AND created_at <= $3
+        AND (type = 'CREDIT_ONLINE' OR type = 'CASH_RECEIVED' OR type = 'REFERRAL_BONUS')
       GROUP BY type;
     `;
-    const currentWeekResult = await pool.query(currentWeekQuery, [driverId, startOfWeek, endOfWeek]);
+    const summaryRes = await pool.query(currentWeekQuery, [driverId, startOfWeek, endOfWeek]);
+    
+    // 🎯 2. NEW: Get Referral List Logic
+    const referralsQuery = `
+       SELECT 
+    wl.ride_external_id as "rideId",
+    wl.amount_paise as amount,
+    wl.is_settled as "isSettled",
+    to_char(wl.created_at, 'DD Mon YYYY') as date,
+    u.name as "passengerName"
+  FROM wallet_ledger wl
+  LEFT JOIN rides r ON r.external_id = wl.ride_external_id
+  LEFT JOIN users u ON u.id = r.passenger_id
+  WHERE wl.driver_id = $1 AND wl.type = 'REFERRAL_BONUS'
+  ORDER BY wl.created_at DESC;
+    `;
+    const referralsRes = await pool.query(referralsQuery, [driverId]);
 
     let onlineEarningsPaise = 0;
     let cashLiabilityPaise = 0;
-
-    currentWeekResult.rows.forEach(row => {
-      if (row.type === 'CREDIT_ONLINE') {
-        onlineEarningsPaise = parseInt(row.total_paise, 10);
-      } else if (row.type === 'CASH_RECEIVED') {
-        cashLiabilityPaise = parseInt(row.total_paise, 10);
-      }
+	let referralBonusPaise = 0;
+    summaryRes.rows.forEach(row => {
+      if (row.type === 'CREDIT_ONLINE') onlineEarningsPaise = parseInt(row.total_paise, 10);
+      else if (row.type === 'CASH_RECEIVED') cashLiabilityPaise = parseInt(row.total_paise, 10);
+	   else if (row.type === 'REFERRAL_BONUS') referralBonusPaise = parseInt(row.total_paise, 10);
     });
 
-    // --- 2. Get Past Unsettled Dues (from before this Monday) ---
-    const pastDuesQuery = `
-      SELECT
-        SUM(CASE WHEN direction = 'CR' THEN amount_paise ELSE -amount_paise END) AS total_due_paise
+    const pastDuesResult = await pool.query(`
+      SELECT SUM(CASE WHEN direction = 'CR' THEN amount_paise ELSE -amount_paise END) AS total_due_paise
       FROM wallet_ledger
-      WHERE driver_id = $1
-        AND is_settled = FALSE
-        AND created_at < $2;
-    `;
-    const pastDuesResult = await pool.query(pastDuesQuery, [driverId, startOfWeek]);
+      WHERE driver_id = $1 AND is_settled = FALSE AND created_at < $2;
+    `, [driverId, startOfWeek]);
 
-    const previousDuesPaise = parseInt(pastDuesResult.rows[0]?.total_due_paise, 10) || 0;
-
-    // --- 3. Format Response ---
-    const response = {
+    res.json({
       onlineEarningsRupees: Math.round(onlineEarningsPaise / 100),
       cashLiabilityRupees: Math.round(cashLiabilityPaise / 100),
+	    referralBonusRupees: Math.round(referralBonusPaise / 100), 
       netEarningsRupees: Math.round((onlineEarningsPaise - cashLiabilityPaise) / 100),
-      previousDuesRupees: Math.round(Math.abs(previousDuesPaise) / 100),
-      weekDisplay: `Week: ${startOfWeek.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })} - ${endOfWeek.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}`
-    };
-
-    res.json(response);
+      previousDuesRupees: Math.round(Math.abs(parseInt(pastDuesResult.rows[0]?.total_due_paise || 0)) / 100),
+      weekDisplay: `Week: ${startOfWeek.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })} - ${endOfWeek.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}`,
+      // ✅ Referrals ki list yahan se jayegi
+      referrals: referralsRes.rows 
+    });
 
   } catch (error) {
-    console.error('Error fetching weekly summary:', error);
+    console.error(error);
     res.status(500).json({ message: 'Internal Server Error' });
   }
 });
 
-// ✅ REPLACE the rating endpoint with this corrected version
+// ✅ server.js mein ye daalo (Existing routes ke niche)
+app.get('/api/passenger/free-ride-status/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    // Check in 'referrals' table
+    const result = await pool.query(
+      'SELECT first_ride_free_used FROM referrals WHERE user_id = $1',
+      [userId]
+    );
 
-// app.post('/api/ride/:rideId/rating', async (req, res) => {
-  // try {
-    // const { rideId: rideExternalId } = req.params; // Get the string ID like 'ride_123'
-    // const { passengerId, driverId, rating, review } = req.body;
+    if (result.rows.length === 0) {
+      // Agar user referral list mein hi nahi hai, toh free ride nahi milegi
+      return res.json({ canUseFreeRide: false,fareLimit: 700 });
+    }
 
-    // if (!rideExternalId || !driverId || !passengerId || rating == null) {
-      // return res.status(400).json({ message: 'Missing required fields for rating.' });
-    // }
+    const used = result.rows[0].first_ride_free_used; // true ya false
+    
+    res.json({ 
+      canUseFreeRide: !used,  // Agar used false hai (f), toh canUseFreeRide true hoga
+	  fareLimit: 700
+    });
+  } catch (e) {
+    console.error('Error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
 
-    // // 1. First, get the integer `id` from the `rides` table using the external ID.
-    // const rideQuery = await pool.query(
-      // `SELECT id FROM rides WHERE external_id = $1 LIMIT 1`,
-      // [rideExternalId]
-    // );
+app.get('/api/admin/free-ride-payouts', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT 
+        pl.ride_external_id AS "rideId",
+        pl.amount_paise AS "rideFarePaise",
+        pl.is_settled AS "rideSettled",
+        pl.created_at AS "date",
+        -- Referral bonus for this same ride
+        wl.amount_paise AS "referralBonusPaise",
+        wl.is_settled AS "referralSettled",
+        wl.driver_id AS "driverId",
+        u.name AS "driverName",
+        u.phone_number AS "driverPhone",
+        (pl.amount_paise + COALESCE(wl.amount_paise, 0)) AS "totalOwedPaise"
+      FROM platform_ledger pl
+      LEFT JOIN wallet_ledger wl 
+        ON wl.ride_external_id = pl.ride_external_id 
+        AND wl.type = 'REFERRAL_BONUS'
+      LEFT JOIN users u ON u.id = wl.driver_id
+      WHERE pl.type = 'REFERRAL_SUBSIDY'
+      ORDER BY pl.created_at DESC
+    `);
+    res.json(result.rows);
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
-    // if (rideQuery.rows.length === 0) {
-      // return res.status(404).json({ message: 'Ride not found with the given external ID.' });
-    // }
-    // const internalRideId = rideQuery.rows[0].id; // This is the integer ID your table needs.
+// PUT /api/admin/free-ride-payouts/:rideId/mark-paid — dono ek saath settle karo
+app.put('/api/admin/free-ride-payouts/:rideId/mark-paid', async (req, res) => {
+  const { rideId } = req.params;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    
+    // 1. platform_ledger mein REFERRAL_SUBSIDY settle karo
+    await client.query(
+      `UPDATE platform_ledger SET is_settled = TRUE, settled_at = NOW()
+       WHERE ride_external_id = $1 AND type = 'REFERRAL_SUBSIDY'`,
+      [rideId]
+    );
+    
+    // 2. wallet_ledger mein REFERRAL_BONUS settle karo
+    await client.query(
+      `UPDATE wallet_ledger SET is_settled = TRUE, settled_at = NOW()
+       WHERE ride_external_id = $1 AND type = 'REFERRAL_BONUS'`,
+      [rideId]
+    );
+    
+    await client.query('COMMIT');
+    res.json({ success: true, message: 'Both ride fare and referral bonus marked as paid' });
+  } catch(e) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
+  }
+});
 
-    // // 2. Insert the rating using the correct integer `ride_id`.
-    // await pool.query(
-      // // --- THIS SQL QUERY IS NOW CORRECT FOR YOUR TABLE ---
-      // `INSERT INTO ride_ratings (ride_id, driver_id, passenger_id, rating, review, created_at)
-       // VALUES ($1, $2, $3, $4, $5, NOW())`,
-      // [internalRideId, driverId, passengerId, rating, review]
-    // );
-
-    // // 3. Update the driver's average rating in the 'drivers' table.
-    // await pool.query(
-      // `UPDATE drivers
-          // SET rating = (
-              // SELECT AVG(rating) FROM ride_ratings WHERE driver_id = $1
-          // ),
-          // rating_count = (
-              // SELECT COUNT(*) FROM ride_ratings WHERE driver_id = $1
-          // )
-        // WHERE user_id = $1`,
-      // [driverId]
-    // );
-
-    // console.log(`✅ Rating received for ride ${rideExternalId}. New average calculated.`);
-    // res.status(201).json({ message: 'Rating submitted successfully' });
-
-  // } catch (error) {
-    // console.error('Error processing ride rating:', error);
-    // res.status(500).json({ message: 'Internal Server Error while saving rating.' });
-  // }
-// });
-
+// GET /api/driver/referral-earnings/:driverId
+app.get('/api/driver/referral-earnings/:driverId', async (req, res) => {
+  const { driverId } = req.params;
+  try {
+    const result = await pool.query(
+      `SELECT 
+         COALESCE(SUM(CASE WHEN is_settled = FALSE THEN amount_paise ELSE 0 END), 0) AS pending,
+         COALESCE(SUM(CASE WHEN is_settled = TRUE  THEN amount_paise ELSE 0 END), 0) AS paid
+       FROM wallet_ledger
+       WHERE driver_id = $1 AND type = 'REFERRAL_BONUS'`,
+      [driverId]
+    );
+    res.json({
+      pending: result.rows[0].pending,
+      paid:    result.rows[0].paid,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
     // ✅✅✅ THIS IS THE FINAL, VICTORIOUS RATING FUNCTION ✅✅✅
     app.post('/api/ride/:rideId/rating', async (req, res) => {
@@ -335,7 +461,7 @@ app.get('/api/drivers/:driverId/weekly-summary', async (req, res) => {
       try {
         await client.query('BEGIN');
         const { rideId: rideExternalId } = req.params;
-        const { passengerId, driverId, rating, review } = req.body;
+        const { passengerId, driverId, rating, review, tags } = req.body;
 
         if (!rideExternalId || !driverId || !passengerId || rating == null) {
           return res.status(400).json({ message: 'Missing required fields for rating.' });
@@ -373,6 +499,25 @@ app.get('/api/drivers/:driverId/weekly-summary', async (req, res) => {
            VALUES ($1, $2, $3, $4, $5, NOW())`,
           [internalRideId, driverId, passengerId, rating, review]
         );
+		
+		 if (Array.isArray(tags) && tags.length > 0) {
+      for (const tag of tags) {
+        await client.query(
+          `
+          INSERT INTO ride_rating_tags
+            (ride_external_id, rated_by_role, tag_key, tag_value)
+          VALUES
+            ($1, 'PASSENGER', $2, $3)
+          ON CONFLICT DO NOTHING
+          `,
+          [
+            rideExternalId,
+            tag.key,    // e.g. "driver_feedback"
+            tag.value,  // e.g. "Polite behaviour"
+          ]
+        );
+      }
+    }
         
         // --- Update the driver's average rating ---
         await client.query(
@@ -449,145 +594,212 @@ app.get('/api/user/:id', async (req, res) => {
 
 // In server.js, replace the existing findDriverForRide function with this one.
 
-// async function findDriverForRide(ride) {
-  // console.log(`[DISPATCHER] Initiating driver search for ride ${ride.external_id}`);
+async function findDriverForRide(ride) {
+  console.log(`[DISPATCHER] Initiating driver search for ride ${ride.external_id}`);
   
-  // // Use a database connection from the global pool
-  // const client = await global.pool.connect();
+  // Use a database connection from the global pool
+  const client = await global.pool.connect();
   
-  // try {
-    // // Step 1: Update the ride status to 'SEARCHING' immediately.
-    // // This prevents it from being dispatched again in the next cycle.
-    // await client.query(
-      // `UPDATE scheduled_rides SET status = 'SEARCHING' WHERE external_id = $1`,
-      // [ride.external_id]
-    // );
+  try {
+    // Step 1: Update the ride status to 'SEARCHING' immediately.
+    // This prevents it from being dispatched again in the next cycle.
+    await client.query(
+      `UPDATE scheduled_rides SET status = 'SEARCHING' WHERE external_id = $1`,
+      [ride.external_id]
+    );
 
-    // // Step 2: Prepare the ride data to send to the driver.
-    // // We can add more details here later if needed.
-    // const rideRequestData = {
-      // rideId: ride.external_id,
-      // pickupAddress: ride.pickup_address,
-      // dropoffAddress: ride.dropoff_address,
-      // estimatedFare: ride.estimated_fare,
-      // scheduledPickupTime: ride.scheduled_pickup_time,
-    // };
+    // Step 2: Prepare the ride data to send to the driver.
+    // We can add more details here later if needed.
+    const rideRequestData = {
+      rideId: ride.external_id,
+      pickupAddress: ride.pickup_address,
+      dropoffAddress: ride.dropoff_address,
+      estimatedFare: ride.estimated_fare,
+      scheduledPickupTime: ride.scheduled_pickup_time,
+    };
 
-    // // Step 3: Emit a socket.io event to all connected drivers in the 'available_drivers' room.
-    // // ✅ CRITICAL FIX: Use `global.io` to access the initialized socket server instance.
-    // if (global.io) {
-      // global.io.to('available_drivers').emit('new-scheduled-ride-request', rideRequestData);
-      // console.log(`[DISPATCHER] Emitted ride request ${ride.external_id} to 'available_drivers' room.`);
-    // } else {
-      // console.error('[DISPATCHER] global.io is not initialized. Cannot emit socket event.');
-    // }
+    // Step 3: Emit a socket.io event to all connected drivers in the 'available_drivers' room.
+    // ✅ CRITICAL FIX: Use `global.io` to access the initialized socket server instance.
+    if (global.io) {
+      global.io.to('available_drivers').emit('new-scheduled-ride-request', rideRequestData);
+      console.log(`[DISPATCHER] Emitted ride request ${ride.external_id} to 'available_drivers' room.`);
+    } else {
+      console.error('[DISPATCHER] global.io is not initialized. Cannot emit socket event.');
+    }
 
-  // } catch (e) {
-    // console.error(`[DISPATCHER] Error processing ride ${ride.external_id}:`, e);
-    // // If an error occurs, revert the status so the system can try again in the next minute.
-    // await client.query(
-        // `UPDATE scheduled_rides SET status = 'SCHEDULED' WHERE external_id = $1`,
-        // [ride.external_id]
-    // );
-  // } finally {
-    // // IMPORTANT: Always release the client back to the pool.
-    // client.release();
-  // }
-// }
+  } catch (e) {
+    console.error(`[DISPATCHER] Error processing ride ${ride.external_id}:`, e);
+    // If an error occurs, revert the status so the system can try again in the next minute.
+    await client.query(
+        `UPDATE scheduled_rides SET status = 'SCHEDULED' WHERE external_id = $1`,
+        [ride.external_id]
+    );
+  } finally {
+    // IMPORTANT: Always release the client back to the pool.
+    client.release();
+  }
+}
+
 
 // ✅✅✅ PASTE THIS ENTIRE NEW ENDPOINT INTO YOUR server.js FILE ✅✅✅
 
 app.get('/api/drivers/:driverId/daily-summary', async (req, res) => {
   const { driverId } = req.params;
-  const { date } = req.query; // Expects a date string like 'YYYY-MM-DD'
+  const { date } = req.query;
 
   if (!driverId) {
     return res.status(400).json({ message: 'Driver ID is required' });
   }
 
-  // --- Date Calculation: Default to today if no date is provided ---
-  const targetDate = date ? new Date(date) : new Date();
-  targetDate.setHours(0, 0, 0, 0); // Start of the day (00:00:00)
-
-  const dayAfter = new Date(targetDate);
-  dayAfter.setDate(targetDate.getDate() + 1); // Start of the next day
+  // IST-aware date bounds
+  const targetDateStr = date || new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
+  const startIST = new Date(`${targetDateStr}T00:00:00+05:30`);
+  const endIST   = new Date(`${targetDateStr}T23:59:59.999+05:30`);
 
   try {
     const client = await pool.connect();
 
-    // --- Query to get ALL completed rides for the target day ---
+    // ✅ Pull completed rides for the day, joining invoice for base+waiting breakdown
     const ridesQuery = `
       SELECT
-        external_id,
-        pickup_address,
-        dropoff_address,
-        final_fare,       -- The total amount the passenger paid
-        completed_at,
-        (SELECT type FROM wallet_ledger wl WHERE wl.ride_external_id = r.external_id AND wl.driver_id = r.driver_id LIMIT 1) as payment_type
-      FROM rides r
-      WHERE driver_id = $1
-        AND status = 'COMPLETED'
-        AND completed_at >= $2
-        AND completed_at < $3
-      ORDER BY completed_at DESC;
+    r.id,
+    r.external_id,
+    r.pickup_address,
+    r.dropoff_address,
+    r.final_fare,
+    r.completed_at,
+    r.payment_mode,
+    COALESCE(ri.base_amount_paise, 0)  AS invoice_base,
+    COALESCE(ri.waiting_amount, 0)     AS invoice_waiting,
+    COALESCE(ri.extra_amount, 0)       AS invoice_extra,
+	COALESCE(ri.toll_amount, 0)        AS invoice_toll,
+    COALESCE(ri.actual_dropoff_address, '') AS actual_dropoff_address,
+    COALESCE(ri.cgst_paise, 0)         AS invoice_cgst,
+    COALESCE(ri.sgst_paise, 0)         AS invoice_sgst,
+ 
+    COALESCE((
+        SELECT SUM(pp.amount)
+        FROM pending_payments pp
+        WHERE pp.paid_in_ride_id = r.id
+          AND pp.status = 'PAID'
+    ), 0) AS penalty_amount
+ 
+FROM rides r
+LEFT JOIN ride_invoices ri ON ri.ride_external_id = r.external_id
+    WHERE r.driver_id = $1
+      AND r.status = 'COMPLETED'
+      AND r.completed_at >= $2
+      AND r.completed_at <= $3
+    ORDER BY r.completed_at DESC
     `;
 
-    const ridesResult = await client.query(ridesQuery, [driverId, targetDate, dayAfter]);
+    const ridesResult = await client.query(ridesQuery, [driverId, startIST, endIST]);
     const rides = ridesResult.rows;
 
-    let totalOnlineEarnings = 0;
+    // ✅ Also fetch actual wallet_ledger credits for this driver today
+    // This is the ground truth — what was actually credited/debited
+    const ledgerQuery = `
+      SELECT
+        wl.ride_external_id,
+        wl.type,
+        wl.direction,
+        wl.amount_paise
+      FROM wallet_ledger wl
+      WHERE wl.driver_id = $1
+        AND wl.created_at >= $2
+        AND wl.created_at <= $3
+        AND wl.type IN ('CREDIT_ONLINE', 'CASH_RECEIVED', 'WAITING_CREDIT')
+    `;
+    const ledgerResult = await client.query(ledgerQuery, [driverId, startIST, endIST]);
+
+    // Index ledger rows by ride_external_id for easy lookup
+    const ledgerByRide = {};
+    for (const row of ledgerResult.rows) {
+      if (!ledgerByRide[row.ride_external_id]) {
+        ledgerByRide[row.ride_external_id] = { creditOnline: 0, cashReceived: 0, waitingCredit: 0 };
+      }
+      const amt = Number(row.amount_paise || 0);
+      if (row.type === 'CREDIT_ONLINE')   ledgerByRide[row.ride_external_id].creditOnline  += amt;
+      if (row.type === 'CASH_RECEIVED')   ledgerByRide[row.ride_external_id].cashReceived  += amt;
+      if (row.type === 'WAITING_CREDIT')  ledgerByRide[row.ride_external_id].waitingCredit += amt;
+    }
+
+    let totalOnlineEarnings  = 0;
     let totalOfflineEarnings = 0;
-    const onlineTransactions = [];
+    const onlineTransactions  = [];
     const offlineTransactions = [];
 
-    // --- Process each ride to calculate earnings and create transaction details ---
     for (const ride of rides) {
-      const totalFare = parseFloat(ride.final_fare);
+      const totalFare     = Number(ride.final_fare     || 0);
+      const invoiceBase   = Number(ride.invoice_base   || 0); // base fare (pre-GST, excl. waiting)
+      const invoiceWaiting= Number(ride.invoice_waiting|| 0); // waiting charges (no GST)
+	   const invoiceExtra   = Number(ride.invoice_extra   || 0); 
+	    const invoiceToll = Number(ride.invoice_toll || 0); 
+      const invoiceCgst   = Number(ride.invoice_cgst   || 0);
+      const invoiceSgst   = Number(ride.invoice_sgst   || 0);
+	   const actualDropoff  = ride.actual_dropoff_address || null;
 
-      // Your magnificent formula to find the amount before GST
-      // (e.g., if fare is 105, base before GST is 100)
-      const fareExcludingGst = totalFare / 1.05;
+      const gstAmount = invoiceCgst + invoiceSgst;
+const roundedBase       = Math.round(invoiceBase);           // align with what UI displays
+const driverBaseShare   = Math.round(roundedBase * 0.97);    // e.g. Math.round(217*0.97) = 210
+const platformBaseShare = roundedBase - driverBaseShare;     // 217 - 210 = 7 (exact, no float loss)
+const driverShare       = driverBaseShare + invoiceWaiting + invoiceExtra + invoiceToll;
+const companyCommission = platformBaseShare;     
 
-      // Driver's share is 65% of the fare *before* GST
-      const driverShare = fareExcludingGst * 0.65;
-      const companyCommission = fareExcludingGst * 0.35;
+    const ledger = ledgerByRide[ride.external_id] || {};
+const isOnline = ride.payment_mode === 'ONLINE' || ledger.creditOnline > 0;
 
       const transactionDetail = {
-        rideId: ride.external_id,
-        from: ride.pickup_address,
-        to: ride.dropoff_address,
-        totalFare: totalFare,
-        fareExcludingGst: fareExcludingGst,
-        driverShare: driverShare,
-        companyCommission: companyCommission
+        rideId:           ride.external_id,
+        from:             ride.pickup_address,
+        to:               ride.dropoff_address,
+        totalFare:        totalFare,          // what passenger paid
+		 actualDropoffAddress: actualDropoff, 
+        invoiceBase:      invoiceBase,        // base fare pre-GST
+        waitingCharges:   invoiceWaiting,     // waiting (no GST, 100% driver)
+		extraDistanceCharges: invoiceExtra, 
+		penaltyAmount: Number(ride.penalty_amount), 
+        gstAmount:        gstAmount,          // GST on base only
+        companyCommission:companyCommission,  // 3% of base
+		tollCharges: invoiceToll,
+        driverShare:      driverShare,        // 97% base + 100% waiting ✅
+        // Ground-truth from ledger (what was actually written)
+        actualCredited:   isOnline
+                            ? (ledger.creditOnline  || driverShare)
+                            : (ledger.cashReceived  || companyCommission), // for cash this is commission owed
+        waitingCredited:  ledger.waitingCredit || 0,
       };
 
-      if (ride.payment_type === 'CREDIT_ONLINE') {
-        totalOnlineEarnings += driverShare;
+      if (isOnline) {
+        // ✅ Online: driver actually receives 97% base + 100% waiting in wallet
+      const actualDriverEarning = ledger.creditOnline || 0;
+        totalOnlineEarnings += actualDriverEarning;
         onlineTransactions.push(transactionDetail);
-      } else { // Assumes CASH_RECEIVED or any other type is offline
-        totalOfflineEarnings += totalFare; // For offline, driver collects the full fare
+      } else {
+        // ✅ Offline/Cash: driver collected full cash, owes 3% commission to company
+        // Show total cash collected (what driver has in hand = full fare)
+        // Net after paying commission = totalFare - companyCommission
+        totalOfflineEarnings += driverShare;
         offlineTransactions.push(transactionDetail);
       }
     }
 
     client.release();
 
-    // --- Send the final, glorious summary object ---
     res.json({
-      summaryDate: targetDate.toISOString().split('T')[0], // 'YYYY-MM-DD'
-      totalRides: rides.length,
-      totalEarnings: totalOnlineEarnings, // Driver's net earning for the day
+      summaryDate: targetDateStr,
+      totalRides:  rides.length,
+      // ✅ Total shown = online credited to wallet + offline cash in hand
+      totalEarnings: totalOnlineEarnings + totalOfflineEarnings,
       online: {
-        totalAmount: totalOnlineEarnings,
-        count: onlineTransactions.length,
-        transactions: onlineTransactions
+        totalAmount:  totalOnlineEarnings,  // 97% base + 100% waiting, actual wallet credit
+        count:        onlineTransactions.length,
+        transactions: onlineTransactions,
       },
       offline: {
-        // For offline, we show the total cash collected by the driver
-        totalAmount: totalOfflineEarnings,
-        count: offlineTransactions.length,
-        transactions: offlineTransactions
+        totalAmount:  totalOfflineEarnings, // full cash collected (driver owes 3% base back)
+        count:        offlineTransactions.length,
+        transactions: offlineTransactions,
       }
     });
 
@@ -597,16 +809,30 @@ app.get('/api/drivers/:driverId/daily-summary', async (req, res) => {
   }
 });
 
-app.get("/health", (req, res) => {
-  res.status(200).send("OK");
-});
+// app.get("/health", (req, res) => {
+  // res.status(200).send("OK");
+// });
 
-app.get('/api/health', (req, res) => {
-  res.status(200).json({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-  });
-});
+// app.get('/api/health', (req, res) => {
+  // res.status(200).json({
+    // status: 'ok',
+    // timestamp: new Date().toISOString(),
+  // });
+// });
+
+app.get('/health',     healthHandler);
+app.get('/api/health', healthHandler);
+
+async function reconcileStateOnStartup() {
+  console.log('🔄 Reconciling system state after restart');
+
+  await pool.query(`
+    UPDATE rides
+    SET status = 'COMPLETED'
+    WHERE status IN ('IN_TRANSIT')
+      AND completed_at IS NOT NULL
+  `);
+}
 
 // --- Listen ---
 const PORT = process.env.PORT || 3000;

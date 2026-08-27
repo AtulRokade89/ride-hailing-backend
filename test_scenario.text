@@ -41,7 +41,7 @@ Driver B sees “Ride already accepted”
 Passenger sees ONLY Driver A
 
 No rematch messages
-Remarks:scenario failed 
+Remarks:scenario pass(but other driver not get notification other driver accept ride like message)
 ------------------------------------------------------------------------------
 🔹 TEST 3 — Two drivers accept at same time (CRITICAL)
 
@@ -66,7 +66,7 @@ Passenger gets correct driver
 No duplicate driver assignment
 
 ❌ If this fails → stop and tell me immediately
-Remarks:
+Remarks: this scenario now working perfectly
 ------------------------------------------------------------------------------
 
 🔹 TEST 4 — One reject, one accept
@@ -90,7 +90,7 @@ Passenger sees:
 Then sees driver accepted
 
 No “driver rejected” after accept
-Remarks:
+Remarks:this testing also completed as expected
 ------------------------------------------------------------------------------
 🔹 TEST 5 — Reject spam (stability)
 
@@ -109,7 +109,7 @@ No duplicate popup
 No crash
 
 Rematch happens once
-Remarks:
+Remarks:this is work as expected
 ------------------------------------------------------------------------------
 🔹 TEST 6 — Passenger cancel during search
 
@@ -126,7 +126,7 @@ Driver popups close
 Passenger returns to idle
 
 No stuck state
-Remarks:
+Remarks:now once passenger cancel pop up also disappear
 ------------------------------------------------------------------------------
 🔹 TEST 7 — App lifecycle edge case
 
@@ -145,5 +145,7 @@ Driver returns to foreground
 No duplicate popup
 
 Active ride resumes correctly
-Remarks:
-------------------------------------------------------------------------------
+Remarks:this final scenario failed what i did passenger send request both showing pop up Driver A immediatly goes to background like open another app
+at same time driver B accept ride notification properly proceed
+But Driver A's pop up not disappear its still showing new ride request pop up and page is showing you are online like
+------------------------------------------------------------------------------------------------------------------------------

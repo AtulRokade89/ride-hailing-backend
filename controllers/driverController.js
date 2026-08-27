@@ -1,17 +1,13 @@
 // In controllers/driverController.js
-// const { Pool } = require('pg');
+const { Pool } = require('pg');
 
-// const pool = new Pool({
-    // user: process.env.DB_USER,
-    // host: process.env.DB_HOST,
-    // database: process.env.DB_NAME,
-    // password: process.env.DB_PASSWORD,
-    // port: process.env.DB_PORT,
-// });
-
-//const pool = global.pool;
-const pool = require('../db');
-
+const pool = new Pool({
+    user: process.env.DB_USER,
+    host: process.env.DB_HOST,
+    database: process.env.DB_NAME,
+    password: process.env.DB_PASSWORD,
+    port: process.env.DB_PORT,
+});
 
 // ✅ FINAL, COMPLETE VERSION
 const unblockAfterPayment = async (req, res) => {
@@ -32,7 +28,7 @@ const unblockAfterPayment = async (req, res) => {
          FROM wallet_ledger
          WHERE driver_id = $1
            AND is_settled = FALSE
-           AND type in('DEBIT_CASH_COLLECTED','CASH_RECEIVED')`,
+           AND type = 'DEBIT_CASH_COLLECTED'`,
         [driverId]
     );
     const duesToSettle = duesResult.rows;
@@ -90,6 +86,29 @@ const unblockAfterPayment = async (req, res) => {
   }
 };
 
+const acceptDriverTerms = async (req, res) => {
+  const driverId = req.user.id; // JWT se
+
+  try {
+    await pool.query(
+      `
+      UPDATE driver_verifications
+      SET 
+        terms_accepted = TRUE,
+        terms_accepted_at = NOW()
+      WHERE user_id = $1
+      `,
+      [driverId]
+    );
+
+    res.json({ success: true });
+  } catch (e) {
+    console.error('acceptDriverTerms error:', e);
+    res.status(500).json({ message: 'Failed to accept terms' });
+  }
+};
+
 module.exports = {
   unblockAfterPayment,
+  acceptDriverTerms,
 };
